@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.apache.coyote.CloseNowException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
@@ -44,6 +45,15 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .contentType(MediaType.TEXT_PLAIN)
                 .body("Tile database temporarily unavailable");
+    }
+
+    /**
+     * HTTP/2 RST_STREAM — client disconnected mid-response.
+     * This is normal during rapid navigation/scrolling; no point returning an error.
+     */
+    @ExceptionHandler(CloseNowException.class)
+    public void handleCloseNowException(CloseNowException ex) {
+        log.debug("Client closed connection mid-response (RST_STREAM): {}", ex.getMessage());
     }
 
     /**

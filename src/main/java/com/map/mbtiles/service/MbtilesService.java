@@ -65,15 +65,16 @@ public class MbtilesService {
             config.setDataSourceProperties(sqLiteConfig.toProperties());
             // Must match the driver's own read-only state to avoid IllegalStateException
             config.setReadOnly(true);
-            // Increased pool size: HTTP/2 multiplexing can push 30+ concurrent requests
-            config.setMaximumPoolSize(20);
-            config.setMinimumIdle(4);
-            // Connection timeout: fail fast (5s) so the browser gets a 503 instead of hanging
-            config.setConnectionTimeout(5000);
+            // HTTP/2 multiplexing can push 30+ concurrent requests per connection
+            // Increased pool size to handle bursts without pool exhaustion
+            config.setMaximumPoolSize(40);
+            config.setMinimumIdle(10);
+            // Connection timeout: 30s gives slow queries time to complete under HTTP/2 load
+            config.setConnectionTimeout(30000);
             // Max lifetime: recycle connections every 30 minutes to avoid stale file handles
             config.setMaxLifetime(1800000);
-            // Avoid expensive idle-connection tests; SQLite file connections are cheap to rebuild
-            config.setKeepaliveTime(0);
+            // Enable keepalive to detect broken connections before they're reused
+            config.setKeepaliveTime(60000);
             config.setPoolName("HikariCP-" + name);
 
             return new HikariDataSource(config);
@@ -145,6 +146,33 @@ public class MbtilesService {
         }
 
         return null;
+    }
+
+    /**
+     * Reads the metadata table from the MBTiles file.
+     * Returns key-value pairs (name, format, bounds, center, minzoom, maxzoom, etc.)
+     */
+    @Cacheable(value = "metadata", key = "#datasetName")
+    public Map<String, String> getMetadata(String datasetName) {
+        DataSource dataSource = getDataSource(datasetName);
+        if (dataSource == null) {
+            return Map.of();
+        }
+
+        Map<String, String> metadata = new java.util.LinkedHashMap<>();
+        String sql = "SELECT name, value FROM metadata";
+
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sql);
+             ResultSet rs = pstmt.executeQuery()) {
+
+            while (rs.next()) {
+                metadata.put(rs.getString("name"), rs.getString("value"));
+            }
+        } catch (SQLException e) {
+            log.warn("Error reading metadata for {}: {}", datasetName, e.getMessage());
+        }
+        return metadata;
     }
 
     /**

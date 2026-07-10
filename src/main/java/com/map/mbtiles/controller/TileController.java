@@ -11,7 +11,7 @@ import org.springframework.http.MediaType;
 
 @RestController
 @RequestMapping("/tiles")
-@CrossOrigin(origins = "*")
+@CrossOrigin(origins = "*", maxAge = 86400)  // 预检缓存24小时，减少OPTIONS请求
 public class TileController {
 
     // Static tiles never change → cache for 7 days in browser + CDN
@@ -29,6 +29,23 @@ public class TileController {
     @GetMapping(value = "/health", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> health() {
         return ResponseEntity.ok("UP | datasources=" + mbtilesService.getDataSourceCount());
+    }
+
+    /**
+     * TileJSON metadata endpoint — returns dataset info (layer names, bounds, zoom range).
+     * Frontends can use this to auto-configure tile sources.
+     * <p>
+     * Example: GET /tiles/basemap_line_point/metadata.json
+     */
+    @GetMapping(value = "/{datasetName}/metadata.json", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<java.util.Map<String, String>> getMetadata(@PathVariable String datasetName) {
+        java.util.Map<String, String> metadata = mbtilesService.getMetadata(datasetName);
+        if (metadata.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL)
+                .body(metadata);
     }
 
     @GetMapping("/{datasetName}/{z}/{x}/{y}.pbf")
