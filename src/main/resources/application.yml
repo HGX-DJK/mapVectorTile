@@ -1,0 +1,38 @@
+server:
+  port: 8443           # HTTPS 标准端口，区别于原来的 8080
+  http2:
+    enabled: true      # 开启 HTTP/2，彻底消灭浏览器 6 连接限制
+  ssl:
+    enabled: true
+    key-store: classpath:keystore.p12
+    key-store-password: 123456
+    key-store-type: PKCS12
+    key-alias: maptile
+  compression:
+    enabled: true
+    mime-types: application/x-protobuf,application/vnd.mapbox-vector-tile,application/json,text/plain,text/html
+    min-response-size: 1024   # 降低压缩阈值到 1KB，让更多小瓦片也能被压缩
+  tomcat:
+    threads:
+      max: 200        # 最大工作线程数（默认200，显式声明便于调整）
+      min-spare: 20   # 保持20个空闲线程随时处理突发请求
+    max-connections: 10000  # 最大连接数（提升到10000适应HTTP/2多路复用）
+    accept-count: 300       # 超出线程时允许排队的请求数
+    connection-timeout: 10000  # 连接超时10秒，避免慢连接占用线程
+
+
+mbtiles:
+  # The directory where the multiple .mbtiles files are stored.
+  data-dir: ./data
+
+spring:
+  cache:
+    type: caffeine
+    caffeine:
+      # 扩大缓存: 50000条瓦片, 30分钟不访问过期, 开启统计监控命中率
+      spec: maximumSize=50000,expireAfterAccess=30m,recordStats
+
+logging:
+  level:
+    com.map.mbtiles: INFO
+    com.zaxxer.hikari: WARN
