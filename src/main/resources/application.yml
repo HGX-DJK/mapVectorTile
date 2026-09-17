@@ -41,6 +41,21 @@ mbtiles:
   cache-control:
     max-age: 604800           # 浏览器/CDN 缓存有效时长（秒，默认 7 天）
     immutable: true           # 标记为 immutable 避免无意义的重复验证
+  # 瓦片表结构与字段自适应探测配置（若后续有新增非标库，直接在下方追加无需改动 Java 代码）
+  schema:
+    candidate-table-names: [tiles, grids, grid]                      # 候选表名优先级
+    candidate-data-columns: [tile_data, grid, data, image, content]  # 候选瓦片二进制/图片字段优先级
+    candidate-zoom-columns: [zoom_level, zoom, z, level]             # 候选层级字段
+    candidate-column-columns: [tile_column, col, column, x]          # 候选列号字段
+    candidate-row-columns: [tile_row, row, y]                        # 候选行号字段
+    # 可选：对特定特殊数据集做定制映射（取消注释即可启用）
+    # dataset-overrides:
+    #   special_map:
+    #     table-name: custom_grids
+    #     data-column: grid
+    #     zoom-column: zoom_level
+    #     col-column: tile_column
+    #     row-column: tile_row
 
 spring:
   cache:

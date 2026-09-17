@@ -5,7 +5,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * MBTiles 瓦片服务核心配置属性类
@@ -35,6 +37,11 @@ public class MbtilesProperties {
      * HTTP Cache-Control 缓存响应头配置
      */
     private CacheControlProperties cacheControl = new CacheControlProperties();
+
+    /**
+     * SQLite 瓦片表结构与字段自适应探测配置（支持扩展非标 SQLite / grids 表）
+     */
+    private SchemaProperties schema = new SchemaProperties();
 
     /**
      * 连接池详细参数配置（针对多文件海量数据源场景深度调优）
@@ -90,5 +97,36 @@ public class MbtilesProperties {
             }
             return value;
         }
+    }
+
+    /**
+     * SQLite 瓦片表与字段自适应探测配置
+     */
+    @Data
+    public static class SchemaProperties {
+        /** 候选表名列表（按优先级尝试，发现存在即采用） */
+        private List<String> candidateTableNames = new ArrayList<>(List.of("tiles", "grids", "grid"));
+        /** 候选瓦片二进制流字段名列表 */
+        private List<String> candidateDataColumns = new ArrayList<>(List.of("tile_data", "grid", "data", "image", "content"));
+        /** 候选缩放层级字段名列表 */
+        private List<String> candidateZoomColumns = new ArrayList<>(List.of("zoom_level", "zoom", "z", "level"));
+        /** 候选列号 (X) 字段名列表 */
+        private List<String> candidateColumnColumns = new ArrayList<>(List.of("tile_column", "col", "column", "x"));
+        /** 候选行号 (Y) 字段名列表 */
+        private List<String> candidateRowColumns = new ArrayList<>(List.of("tile_row", "row", "y"));
+        /** 特殊数据集个性化定制覆盖映射: datasetName -> CustomDatasetSchema */
+        private Map<String, CustomDatasetSchema> datasetOverrides = new HashMap<>();
+    }
+
+    /**
+     * 单数据集专属定制表结构覆盖配置
+     */
+    @Data
+    public static class CustomDatasetSchema {
+        private String tableName;
+        private String dataColumn;
+        private String zoomColumn;
+        private String colColumn;
+        private String rowColumn;
     }
 }

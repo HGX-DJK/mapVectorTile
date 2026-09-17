@@ -1,6 +1,7 @@
 package com.map.mbtiles;
 
 import com.map.mbtiles.model.DatasetInfo;
+import com.map.mbtiles.model.TableSchema;
 import com.map.mbtiles.model.TileEntry;
 import com.map.mbtiles.model.TileScheme;
 import org.junit.jupiter.api.DisplayName;
@@ -19,6 +20,52 @@ import static org.junit.jupiter.api.Assertions.*;
 class TileServiceTest {
 
     private static final Pattern SAFE_DATASET_NAME = Pattern.compile("^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$");
+
+    @Test
+    @DisplayName("TableSchema 标准与非标表名 (grids) / 字段 (grid) SQL 生成正确性")
+    void testTableSchemaSqlGeneration() {
+        // 1. 标准 MBTiles 表结构
+        TableSchema defaultSchema = TableSchema.DEFAULT;
+        assertEquals("SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?",
+                defaultSchema.selectTileSql());
+        assertEquals("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles WHERE zoom_level <= ?",
+                defaultSchema.selectWarmupSql());
+        assertEquals("CREATE UNIQUE INDEX IF NOT EXISTS tiles_zxy_idx ON tiles (zoom_level, tile_column, tile_row)",
+                defaultSchema.createIndexSql());
+
+        // 2. 非标 grids 表与 grid 字段
+        TableSchema customSchema = new TableSchema("grids", "zoom_level", "tile_column", "tile_row", "grid");
+        assertEquals("SELECT grid FROM grids WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?",
+                customSchema.selectTileSql());
+        assertEquals("SELECT zoom_level, tile_column, tile_row, grid FROM grids WHERE zoom_level <= ?",
+                customSchema.selectWarmupSql());
+        assertEquals("CREATE UNIQUE INDEX IF NOT EXISTS grids_zxy_idx ON grids (zoom_level, tile_column, tile_row)",
+                customSchema.createIndexSql());
+    }
+
+    @Test
+    @DisplayName("二进制流前导魔数（Magic Number）智能推断真实 MIME 类型")
+    void testMagicBytesContentTypeDetection() {
+        // PNG 魔数: 89 50 4E 47
+        byte[] pngHeader = new byte[]{(byte) 0x89, (byte) 0x50, (byte) 0x4E, (byte) 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+        TileEntry pngTile = new TileEntry(pngHeader, "\"png\"", false);
+        assertEquals("image/png", pngTile.detectContentType());
+
+        // JPEG 魔数: FF D8 FF
+        byte[] jpegHeader = new byte[]{(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0};
+        TileEntry jpegTile = new TileEntry(jpegHeader, "\"jpeg\"", false);
+        assertEquals("image/jpeg", jpegTile.detectContentType());
+
+        // WebP 魔数: RIFF....WEBP
+        byte[] webpHeader = new byte[]{(byte) 'R', (byte) 'I', (byte) 'F', (byte) 'F', 0, 0, 0, 0, (byte) 'W', (byte) 'E', (byte) 'B', (byte) 'P'};
+        TileEntry webpTile = new TileEntry(webpHeader, "\"webp\"", false);
+        assertEquals("image/webp", webpTile.detectContentType());
+
+        // Protobuf / 矢量切片
+        byte[] pbfPayload = new byte[]{0x1A, 0x2B, 0x3C, 0x4D};
+        TileEntry pbfTile = new TileEntry(pbfPayload, "\"pbf\"", false);
+        assertEquals("application/x-protobuf", pbfTile.detectContentType());
+    }
 
     @Test
     @DisplayName("TMS 与 XYZ 坐标相互转换数学正确性")

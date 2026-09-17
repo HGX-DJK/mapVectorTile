@@ -188,18 +188,33 @@ public class TileController {
     }
 
     /**
-     * 获取指定坐标的矢量瓦片
-     * 完全兼容 Spring 6 PathPatternParser，支持 1~3 级子目录及 .pbf、.mvt 和无后缀路由
+     * 获取指定坐标的矢量或栅格瓦片
+     * 完全兼容 Spring 6 PathPatternParser，支持 1~3 级子目录及 .pbf、.mvt、.png、.jpg、.webp 和无后缀全格式路由
      */
     @GetMapping(value = {
+            // 单层数据集路由 (支持矢量切片与栅格图片双模)
             "/{datasetName}/{z}/{x}/{y}.pbf",
             "/{datasetName}/{z}/{x}/{y}.mvt",
+            "/{datasetName}/{z}/{x}/{y}.png",
+            "/{datasetName}/{z}/{x}/{y}.jpg",
+            "/{datasetName}/{z}/{x}/{y}.jpeg",
+            "/{datasetName}/{z}/{x}/{y}.webp",
             "/{datasetName}/{z}/{x}/{y}",
+            // 二层子目录路由
             "/{dir1}/{datasetName}/{z}/{x}/{y}.pbf",
             "/{dir1}/{datasetName}/{z}/{x}/{y}.mvt",
+            "/{dir1}/{datasetName}/{z}/{x}/{y}.png",
+            "/{dir1}/{datasetName}/{z}/{x}/{y}.jpg",
+            "/{dir1}/{datasetName}/{z}/{x}/{y}.jpeg",
+            "/{dir1}/{datasetName}/{z}/{x}/{y}.webp",
             "/{dir1}/{datasetName}/{z}/{x}/{y}",
+            // 三层子目录路由
             "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}.pbf",
             "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}.mvt",
+            "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}.png",
+            "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}.jpg",
+            "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}.jpeg",
+            "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}.webp",
             "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}"
     })
     public ResponseEntity<byte[]> getVectorTile(
@@ -263,7 +278,7 @@ public class TileController {
 
         // 7. Gzip 内容协商（RFC 7231 / RFC 9110 规范）：
         //    如果瓦片经 gzip 压缩，但客户端未声明 Accept-Encoding: gzip（如仅 identity 或显式 gzip;q=0），
-        //    服务端动态解压为未压缩原始 protobuf 流，确保兼容所有老旧地图渲染器与命令行工具。
+        //    服务端动态解压为未压缩原始流，确保兼容所有老旧地图渲染器与命令行工具。
         byte[] responseData = tile.data();
         boolean sendGzip = false;
 
@@ -281,7 +296,8 @@ public class TileController {
         }
 
         HttpHeaders headers = new HttpHeaders();
-        headers.set(HttpHeaders.CONTENT_TYPE, "application/x-protobuf");
+        // 自动根据魔数识别下发 image/png, image/jpeg, image/webp 或 application/x-protobuf
+        headers.set(HttpHeaders.CONTENT_TYPE, tile.detectContentType());
         headers.set(HttpHeaders.CACHE_CONTROL, getCacheControlHeader());
         // 解压后若以未压缩格式传输，以 W/ 弱 ETag 标示；压缩原样传输则使用强 ETag
         headers.set(HttpHeaders.ETAG, sendGzip ? etag : "W/" + etag);

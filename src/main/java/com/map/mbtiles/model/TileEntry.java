@@ -28,4 +28,30 @@ public record TileEntry(
     public boolean isEmpty() {
         return this.data == null || this.data.length == 0;
     }
+
+    /**
+     * 根据二进制前导魔数（Magic Number）智能推断真实的 MIME Content-Type
+     * 纳秒级自动区分 PNG、JPEG、WebP 栅格图片与 MVT/PBF 矢量切片
+     */
+    public String detectContentType() {
+        if (data == null || data.length < 4) {
+            return "application/x-protobuf";
+        }
+        // PNG 图片魔数: 89 50 4E 47 (\x89PNG)
+        if (data[0] == (byte) 0x89 && data[1] == (byte) 0x50 && data[2] == (byte) 0x4E && data[3] == (byte) 0x47) {
+            return "image/png";
+        }
+        // JPEG 图片魔数: FF D8 FF
+        if ((data[0] & 0xFF) == 0xFF && (data[1] & 0xFF) == 0xD8 && (data[2] & 0xFF) == 0xFF) {
+            return "image/jpeg";
+        }
+        // WebP 图片魔数: RIFF....WEBP
+        if (data.length >= 12
+                && data[0] == (byte) 'R' && data[1] == (byte) 'I' && data[2] == (byte) 'F' && data[3] == (byte) 'F'
+                && data[8] == (byte) 'W' && data[9] == (byte) 'E' && data[10] == (byte) 'B' && data[11] == (byte) 'P') {
+            return "image/webp";
+        }
+        // 默认矢量切片
+        return "application/x-protobuf";
+    }
 }

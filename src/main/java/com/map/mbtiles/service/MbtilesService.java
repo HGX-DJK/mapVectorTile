@@ -2,6 +2,7 @@ package com.map.mbtiles.service;
 
 import com.map.mbtiles.config.MbtilesProperties;
 import com.map.mbtiles.model.DatasetInfo;
+import com.map.mbtiles.model.TableSchema;
 import com.map.mbtiles.model.TileEntry;
 import com.map.mbtiles.model.TileScheme;
 import com.zaxxer.hikari.HikariConfig;
@@ -70,6 +71,8 @@ public class MbtilesService {
     private final Map<String, TileScheme> datasetSchemes = new ConcurrentHashMap<>();
     /** 记录已在 metadata 中显式硬性声明或已成功自愈锁定的数据集集合 */
     private final Set<String> lockedSchemes = ConcurrentHashMap.newKeySet();
+    /** 每个数据集确定或自适应探测识别出的 SQLite 表结构与字段元信息映射 */
+    private final Map<String, TableSchema> datasetTableSchemas = new ConcurrentHashMap<>();
 
     public MbtilesService(MbtilesProperties properties, CacheManager cacheManager) {
         this.properties = properties;
@@ -241,7 +244,7 @@ public class MbtilesService {
 
     /**
      * 确保数据库联合索引存在并激活 WAL 模式
-     * 深度兼容 Schema A（tiles 扁平实体表）与 Schema B（通过 map + images 拼接的视图）
+     * 深度兼容标准 tiles 实体表、视图（map + images）以及非标 grids 表
      */
     private void ensureIndexAndWal(File mbtilesFile) {
         String url = "jdbc:sqlite:" + mbtilesFile.getAbsolutePath();
@@ -251,21 +254,24 @@ public class MbtilesService {
             // 在可写初始化连接上显式开启 WAL 模式
             stmt.execute("PRAGMA journal_mode = WAL");
 
-            // 检查 'tiles' 属于实体表还是视图
-            String tilesType = null;
-            try (ResultSet rs = stmt.executeQuery("SELECT type FROM sqlite_master WHERE name = 'tiles'")) {
+            // 自适应解析该数据库的表结构元信息 (tiles 或 grids 等)
+            TableSchema schema = getTableSchema(mbtilesFile.getName(), conn);
+
+            // 检查对应表属于实体表还是视图
+            String tableType = null;
+            try (ResultSet rs = stmt.executeQuery("SELECT type FROM sqlite_master WHERE name = '" + schema.tableName() + "'")) {
                 if (rs.next()) {
-                    tilesType = rs.getString("type");
+                    tableType = rs.getString("type");
                 }
             }
 
-            if ("view".equalsIgnoreCase(tilesType)) {
-                log.info("{} 采用 MBTiles 视图结构（VIEW），在底层 map 和 images 表上建立索引", mbtilesFile.getName());
+            if ("view".equalsIgnoreCase(tableType)) {
+                log.info("{} 采用 MBTiles 视图结构（VIEW: {}），在底层 map 和 images 表上建立索引", mbtilesFile.getName(), schema.tableName());
                 stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS map_tile_idx ON map (zoom_level, tile_column, tile_row)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS images_tile_id_idx ON images (tile_id)");
             } else {
-                log.info("{} 采用 MBTiles 实体表结构（TABLE），在 tiles 表上建立联合索引", mbtilesFile.getName());
-                stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS tile_index ON tiles (zoom_level, tile_column, tile_row)");
+                log.info("{} 采用实体表结构（TABLE: {}），在对应列上建立联合索引", mbtilesFile.getName(), schema.tableName());
+                stmt.execute(schema.createIndexSql());
             }
 
             // 执行检查点截断 WAL，确保只读连接池在一个整洁的状态下启动
@@ -274,6 +280,110 @@ public class MbtilesService {
         } catch (Exception e) {
             log.warn("检查或初始化索引/WAL失败 {}: {}", mbtilesFile.getName(), e.getMessage());
         }
+    }
+
+    /**
+     * 获取（或自适应探测识别）指定数据集的底层 SQLite 表结构（支持 yml 个性化配置与自动探测）
+     */
+    public TableSchema getTableSchema(String datasetName, Connection conn) {
+        String normalizedName = normalizeDatasetName(datasetName);
+        if (normalizedName == null) {
+            return TableSchema.DEFAULT;
+        }
+
+        TableSchema cached = datasetTableSchemas.get(normalizedName);
+        if (cached != null) {
+            return cached;
+        }
+
+        // 1. 检查 application.yml 中是否对该数据集配置了个性化覆盖规则
+        MbtilesProperties.SchemaProperties schemaProps = properties.getSchema();
+        MbtilesProperties.CustomDatasetSchema custom = schemaProps.getDatasetOverrides().get(normalizedName);
+        if (custom != null && custom.getTableName() != null && custom.getDataColumn() != null) {
+            TableSchema customSchema = new TableSchema(
+                    custom.getTableName(),
+                    custom.getZoomColumn() != null ? custom.getZoomColumn() : "zoom_level",
+                    custom.getColColumn() != null ? custom.getColColumn() : "tile_column",
+                    custom.getRowColumn() != null ? custom.getRowColumn() : "tile_row",
+                    custom.getDataColumn()
+            );
+            datasetTableSchemas.put(normalizedName, customSchema);
+            log.info("数据集 '{}' 采用 yml 中配置的自定义表结构: 表名 [{}], 瓦片字段 [{}], 坐标字段 [{}, {}, {}]",
+                    normalizedName, customSchema.tableName(), customSchema.dataCol(),
+                    customSchema.zoomCol(), customSchema.colCol(), customSchema.rowCol());
+            return customSchema;
+        }
+
+        // 2. 动态读取 SQLite 元数据字典自适应探测
+        TableSchema detected = detectTableSchemaFromDb(conn, normalizedName, schemaProps);
+        datasetTableSchemas.put(normalizedName, detected);
+        return detected;
+    }
+
+    /**
+     * 读取 SQLite 元数据字典，比对配置的候选表名与候选列名
+     */
+    private TableSchema detectTableSchemaFromDb(Connection conn, String datasetName, MbtilesProperties.SchemaProperties schemaProps) {
+        if (conn == null) {
+            return TableSchema.DEFAULT;
+        }
+
+        try (Statement stmt = conn.createStatement()) {
+            // 2.1 获取数据库中所有存在的表和视图名
+            List<String> existingTables = new ArrayList<>();
+            try (ResultSet rs = stmt.executeQuery("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")) {
+                while (rs.next()) {
+                    existingTables.add(rs.getString(1).toLowerCase());
+                }
+            }
+
+            // 2.2 按候选表名优先级寻找首个匹配的表名
+            String matchedTable = null;
+            for (String candidate : schemaProps.getCandidateTableNames()) {
+                if (existingTables.contains(candidate.toLowerCase())) {
+                    matchedTable = candidate;
+                    break;
+                }
+            }
+
+            if (matchedTable == null) {
+                // 候选列表均未匹配，兜底采用默认 tiles
+                return TableSchema.DEFAULT;
+            }
+
+            // 2.3 获取该表的所有列名
+            List<String> columns = new ArrayList<>();
+            try (ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + matchedTable + ")")) {
+                while (rs.next()) {
+                    columns.add(rs.getString("name").toLowerCase());
+                }
+            }
+
+            String dataCol = findFirstMatch(columns, schemaProps.getCandidateDataColumns(), "tile_data");
+            String zoomCol = findFirstMatch(columns, schemaProps.getCandidateZoomColumns(), "zoom_level");
+            String colCol = findFirstMatch(columns, schemaProps.getCandidateColumnColumns(), "tile_column");
+            String rowCol = findFirstMatch(columns, schemaProps.getCandidateRowColumns(), "tile_row");
+
+            TableSchema schema = new TableSchema(matchedTable, zoomCol, colCol, rowCol, dataCol);
+            log.info("数据集 '{}' 自动探测识别表结构: 表名 [{}], 瓦片字段 [{}], 坐标字段 [{}, {}, {}]",
+                    datasetName, matchedTable, dataCol, zoomCol, colCol, rowCol);
+            return schema;
+
+        } catch (SQLException e) {
+            log.warn("探测数据集 '{}' 表结构失败: {}, 回退到默认表结构", datasetName, e.getMessage());
+            return TableSchema.DEFAULT;
+        }
+    }
+
+    private String findFirstMatch(List<String> actualColumns, List<String> candidates, String fallback) {
+        if (candidates != null) {
+            for (String candidate : candidates) {
+                if (actualColumns.contains(candidate.toLowerCase())) {
+                    return candidate;
+                }
+            }
+        }
+        return fallback;
     }
 
     /**
@@ -399,9 +509,9 @@ public class MbtilesService {
         TileScheme scheme = getDatasetScheme(normalizedName);
         int targetRow = scheme.toDatabaseRow(z, y);
 
-        String sql = "SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?";
-
         try (Connection conn = dataSource.getConnection()) {
+            TableSchema schema = getTableSchema(normalizedName, conn);
+            String sql = schema.selectTileSql();
             byte[] data = queryTileData(conn, sql, z, x, targetRow);
 
             // 若主推坐标未查出数据，且当前数据集尚未锁定坐标系，触发智能自愈反向探测
@@ -456,18 +566,19 @@ public class MbtilesService {
 
         TileScheme scheme = getDatasetScheme(datasetName);
         Cache tileCache = cacheManager.getCache("tiles");
-        String sql = "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles WHERE zoom_level <= ?";
         int loaded = 0;
 
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
+        try (Connection conn = dataSource.getConnection()) {
+            TableSchema schema = getTableSchema(datasetName, conn);
+            String sql = schema.selectWarmupSql();
 
-            pstmt.setInt(1, maxZoom);
+            try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
+                pstmt.setInt(1, maxZoom);
 
-            try (ResultSet rs = pstmt.executeQuery()) {
-                while (rs.next()) {
-                    int z = rs.getInt(1);
-                    int x = rs.getInt(2);
+                try (ResultSet rs = pstmt.executeQuery()) {
+                    while (rs.next()) {
+                        int z = rs.getInt(1);
+                        int x = rs.getInt(2);
                     int tileRow = rs.getInt(3);
                     byte[] data = rs.getBytes(4);
 
@@ -492,6 +603,7 @@ public class MbtilesService {
                         tileCache.put(datasetName + ":" + z + ":" + x + ":" + y, entry);
                     }
                     loaded++;
+                }
                 }
             }
         } catch (SQLException e) {
@@ -575,11 +687,12 @@ public class MbtilesService {
             log.info("已释放数据集 '{}' 的连接池资源", normalizedName);
         }
 
-        // 2. 清理元数据、访问时间戳与坐标系规范缓存
+        // 2. 清理元数据、访问时间戳、坐标系规范与表结构缓存
         lastAccessTimes.remove(normalizedName);
         datasetInfoCache.remove(normalizedName);
         datasetSchemes.remove(normalizedName);
         lockedSchemes.remove(normalizedName);
+        datasetTableSchemas.remove(normalizedName);
 
         // 3. 清理 Spring Cache 中的 metadata 缓存
         Cache metaCache = cacheManager.getCache("metadata");
@@ -643,5 +756,6 @@ public class MbtilesService {
         datasetInfoCache.clear();
         datasetSchemes.clear();
         lockedSchemes.clear();
+        datasetTableSchemas.clear();
     }
 }
