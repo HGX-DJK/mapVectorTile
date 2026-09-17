@@ -32,7 +32,7 @@ public enum TileScheme {
      * 根据字符串解析 TileScheme，默认回退为 null
      */
     public static TileScheme fromString(String str) {
-        if (str == null || str.isBlank()) {
+        if (str == null || str.trim().isEmpty()) {
             return null;
         }
         String clean = str.trim().toLowerCase();

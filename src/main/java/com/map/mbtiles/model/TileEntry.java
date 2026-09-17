@@ -1,19 +1,18 @@
 package com.map.mbtiles.model;
 
+import java.util.Arrays;
+import java.util.Objects;
+
 /**
- * 瓦片缓存不可变包装对象（Record）
+ * 瓦片缓存不可变包装对象（兼容 Java 8）
  * 同时存储瓦片二进制数据及预先计算好的元数据（ETag、是否已 Gzip 压缩），
  * 确保命中缓存时无需重复计算哈希或检查魔数字节，实现零额外 CPU 开销。
- *
- * @param data    瓦片原始二进制字节数组（PBF 格式）
- * @param etag    预先计算好的 ETag 唯一标识符
- * @param gzipped 标记该瓦片在数据库中是否已被 Gzip 压缩
  */
-public record TileEntry(
-        byte[] data,
-        String etag,
-        boolean gzipped
-) {
+public final class TileEntry {
+
+    private final byte[] data;
+    private final String etag;
+    private final boolean gzipped;
 
     /**
      * 空瓦片单例常量，用于负向缓存防穿透。
@@ -21,6 +20,36 @@ public record TileEntry(
      * 占用极小堆内存（0 字节数组），彻底杜绝空白区域反复穿透到 SQLite。
      */
     public static final TileEntry EMPTY = new TileEntry(new byte[0], "\"empty\"", false);
+
+    public TileEntry(byte[] data, String etag, boolean gzipped) {
+        this.data = data;
+        this.etag = etag;
+        this.gzipped = gzipped;
+    }
+
+    public byte[] data() {
+        return this.data;
+    }
+
+    public String etag() {
+        return this.etag;
+    }
+
+    public boolean gzipped() {
+        return this.gzipped;
+    }
+
+    public byte[] getData() {
+        return this.data;
+    }
+
+    public String getEtag() {
+        return this.etag;
+    }
+
+    public boolean isGzipped() {
+        return this.gzipped;
+    }
 
     /**
      * 判断当前瓦片是否为空瓦片
@@ -53,5 +82,31 @@ public record TileEntry(
         }
         // 默认矢量切片
         return "application/x-protobuf";
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        TileEntry tileEntry = (TileEntry) o;
+        return gzipped == tileEntry.gzipped &&
+                Arrays.equals(data, tileEntry.data) &&
+                Objects.equals(etag, tileEntry.etag);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = Objects.hash(etag, gzipped);
+        result = 31 * result + Arrays.hashCode(data);
+        return result;
+    }
+
+    @Override
+    public String toString() {
+        return "TileEntry{" +
+                "dataLength=" + (data != null ? data.length : 0) +
+                ", etag='" + etag + '\'' +
+                ", gzipped=" + gzipped +
+                '}';
     }
 }

@@ -10,9 +10,10 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 /**
- * 启动预热执行器
+ * 启动预热执行器（兼容 Java 8）
  *
  * 在应用启动完成后，自动对核心数据集的低缩放级别（如 z=0~6）进行单 SQL 批量流式预热，
  * 将热点概览瓦片直接填充至 Caffeine 内存缓存，彻底消除冷启动首次访问延迟。
@@ -61,7 +62,7 @@ public class TileWarmupRunner implements ApplicationRunner {
             targetNames = datasets.stream()
                     .map(DatasetInfo::getName)
                     .limit(limit)
-                    .toList();
+                    .collect(Collectors.toList());
             log.info("检测到 {} 个数据集，按策略预热前 {} 个核心数据集: {}", datasets.size(), limit, targetNames);
         }
 

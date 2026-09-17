@@ -4,23 +4,24 @@ import com.map.mbtiles.config.MbtilesProperties;
 import com.map.mbtiles.model.DatasetInfo;
 import com.map.mbtiles.model.TileEntry;
 import com.map.mbtiles.service.MbtilesService;
-import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.servlet.http.HttpServletRequest;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
 
 /**
- * 矢量瓦片 REST 控制器
+ * 矢量瓦片 REST 控制器（兼容 Java 8）
  * 提供瓦片二进制流响应（支持 .pbf / .mvt 双后缀及子目录层级）、TileJSON 3.0 标准规范端点、
  * 数据集目录、空间范围（BBox）拓扑剪枝、缓存指标监控与数据集热重载
  */
@@ -66,33 +67,33 @@ public class TileController {
     public ResponseEntity<Map<String, String>> reloadDatasets(
             @RequestParam(value = "dataset", required = false) String dataset) {
 
-        if (dataset != null && !dataset.isBlank()) {
+        if (dataset != null && !dataset.trim().isEmpty()) {
             if (!mbtilesService.isValidDatasetName(dataset)) {
-                return ResponseEntity.badRequest().body(Map.of(
-                        "status", "error",
-                        "message", "指定重载的数据集名称非法: " + dataset
-                ));
+                Map<String, String> err = new LinkedHashMap<>();
+                err.put("status", "error");
+                err.put("message", "指定重载的数据集名称非法: " + dataset);
+                return ResponseEntity.badRequest().body(err);
             }
             boolean success = mbtilesService.reloadDataset(dataset);
             if (success) {
-                return ResponseEntity.ok(Map.of(
-                        "status", "success",
-                        "dataset", mbtilesService.normalizeDatasetName(dataset),
-                        "message", "数据集 '" + dataset + "' 已独立热重载完成（其余数据集缓存完整保留）"
-                ));
+                Map<String, String> res = new LinkedHashMap<>();
+                res.put("status", "success");
+                res.put("dataset", mbtilesService.normalizeDatasetName(dataset));
+                res.put("message", "数据集 '" + dataset + "' 已独立热重载完成（其余数据集缓存完整保留）");
+                return ResponseEntity.ok(res);
             } else {
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
-                        "status", "error",
-                        "message", "数据集 '" + dataset + "' 热重载失败"
-                ));
+                Map<String, String> err = new LinkedHashMap<>();
+                err.put("status", "error");
+                err.put("message", "数据集 '" + dataset + "' 热重载失败");
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(err);
             }
         }
 
         mbtilesService.reloadDatasets();
-        return ResponseEntity.ok(Map.of(
-                "status", "success",
-                "message", "所有 MBTiles / DB 数据集与缓存已全部全局热重载"
-        ));
+        Map<String, String> allRes = new LinkedHashMap<>();
+        allRes.put("status", "success");
+        allRes.put("message", "所有 MBTiles / DB 数据集与缓存已全部全局热重载");
+        return ResponseEntity.ok(allRes);
     }
 
     /**
@@ -125,7 +126,7 @@ public class TileController {
 
     /**
      * 标准 TileJSON 3.0 规范端点
-     * 兼容 Spring 6 PathPatternParser，支持 1~3 级子目录及双下划线别名
+     * 兼容 Spring MVC，支持 1~3 级子目录及双下划线别名
      */
     @GetMapping(value = {
             "/{datasetName}/tilejson.json",
@@ -158,7 +159,7 @@ public class TileController {
         tileJson.put("attribution", info.getAttribution());
         tileJson.put("format", info.getFormat());
         tileJson.put("scheme", "xyz");
-        tileJson.put("tiles", List.of(tileUrl));
+        tileJson.put("tiles", Collections.singletonList(tileUrl));
         tileJson.put("minzoom", info.getMinzoom());
         tileJson.put("maxzoom", info.getMaxzoom());
         tileJson.put("bounds", info.getBounds());
@@ -189,7 +190,7 @@ public class TileController {
 
     /**
      * 获取指定坐标的矢量或栅格瓦片
-     * 完全兼容 Spring 6 PathPatternParser，支持 1~3 级子目录及 .pbf、.mvt、.png、.jpg、.webp 和无后缀全格式路由
+     * 支持 1~3 级子目录及 .pbf、.mvt、.png、.jpg、.webp 和无后缀全格式路由
      */
     @GetMapping(value = {
             // 单层数据集路由 (支持矢量切片与栅格图片双模)
@@ -316,7 +317,7 @@ public class TileController {
      */
     private boolean clientAcceptsGzip(HttpServletRequest request) {
         String acceptEncoding = request.getHeader(HttpHeaders.ACCEPT_ENCODING);
-        if (acceptEncoding == null || acceptEncoding.isBlank()) {
+        if (acceptEncoding == null || acceptEncoding.trim().isEmpty()) {
             return false;
         }
         for (String encoding : acceptEncoding.split(",")) {
@@ -353,7 +354,7 @@ public class TileController {
     private String resolveDatasetNameForTile(HttpServletRequest request, String pathVar, int z, int x, int y) {
         String uri = request.getRequestURI();
         String contextPath = request.getContextPath();
-        if (contextPath != null && !contextPath.isBlank() && uri.startsWith(contextPath)) {
+        if (contextPath != null && !contextPath.trim().isEmpty() && uri.startsWith(contextPath)) {
             uri = uri.substring(contextPath.length());
         }
 
@@ -383,7 +384,7 @@ public class TileController {
     private String resolveDatasetNameFromRequest(HttpServletRequest request, String pathVar, String suffix) {
         String uri = request.getRequestURI();
         String contextPath = request.getContextPath();
-        if (contextPath != null && !contextPath.isBlank() && uri.startsWith(contextPath)) {
+        if (contextPath != null && !contextPath.trim().isEmpty() && uri.startsWith(contextPath)) {
             uri = uri.substring(contextPath.length());
         }
 
@@ -404,15 +405,15 @@ public class TileController {
      */
     private String resolveBaseUrl(HttpServletRequest request) {
         String scheme = request.getHeader("X-Forwarded-Proto");
-        if (scheme == null || scheme.isBlank()) {
+        if (scheme == null || scheme.trim().isEmpty()) {
             scheme = request.getScheme();
         }
 
         String host = request.getHeader("X-Forwarded-Host");
-        if (host == null || host.isBlank()) {
+        if (host == null || host.trim().isEmpty()) {
             host = request.getHeader("Host");
         }
-        if (host == null || host.isBlank()) {
+        if (host == null || host.trim().isEmpty()) {
             host = request.getServerName();
             int port = request.getServerPort();
             if (port != 80 && port != 443 && port > 0) {
@@ -428,7 +429,7 @@ public class TileController {
      * 校验 ETag 是否与客户端发送的 If-None-Match 请求头相匹配（RFC 7232 规范实现）
      */
     private boolean matchesETag(String etag, String ifNoneMatch) {
-        if (ifNoneMatch == null || ifNoneMatch.isBlank()) {
+        if (ifNoneMatch == null || ifNoneMatch.trim().isEmpty()) {
             return false;
         }
 

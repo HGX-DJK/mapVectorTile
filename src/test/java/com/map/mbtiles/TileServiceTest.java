@@ -155,15 +155,14 @@ class TileServiceTest {
     @DisplayName("DatasetInfo 元数据、Zoom 范围与地理空间 BBox 拓扑短路剪枝校验")
     void testDatasetInfoAndBBoxPruning() {
         // 模拟一个北京区域数据集: 经度 115.4 ~ 117.5, 纬度 39.4 ~ 41.1
-        Map<String, String> rawMeta = Map.of(
-                "name", "beijing_basemap",
-                "format", "pbf",
-                "minzoom", "8",
-                "maxzoom", "14",
-                "bounds", "115.4,39.4,117.5,41.1",
-                "center", "116.4,39.9,10",
-                "json", "{\"vector_layers\": [{\"id\": \"roads\", \"fields\": {}}]}"
-        );
+        Map<String, String> rawMeta = new java.util.LinkedHashMap<>();
+        rawMeta.put("name", "beijing_basemap");
+        rawMeta.put("format", "pbf");
+        rawMeta.put("minzoom", "8");
+        rawMeta.put("maxzoom", "14");
+        rawMeta.put("bounds", "115.4,39.4,117.5,41.1");
+        rawMeta.put("center", "116.4,39.9,10");
+        rawMeta.put("json", "{\"vector_layers\": [{\"id\": \"roads\", \"fields\": {}}]}");
 
         DatasetInfo info = DatasetInfo.fromMetadata("beijing_basemap", rawMeta, 1024000L, System.currentTimeMillis());
 
@@ -280,7 +279,7 @@ class TileServiceTest {
         }
     }
 
-    private static final java.util.List<String> SUPPORTED_EXTENSIONS = java.util.List.of(
+    private static final java.util.List<String> SUPPORTED_EXTENSIONS = java.util.Arrays.asList(
             ".mbtiles",
             ".db",
             ".sqlite",
@@ -303,7 +302,7 @@ class TileServiceTest {
      * 辅助方法：校验 ETag 是否与客户端发送的 If-None-Match 请求头匹配
      */
     private boolean matchesETag(String etag, String ifNoneMatch) {
-        if (ifNoneMatch == null || ifNoneMatch.isBlank()) return false;
+        if (ifNoneMatch == null || ifNoneMatch.trim().isEmpty()) return false;
         String cleanEtag = stripQuotesAndWeak(etag);
         for (String token : ifNoneMatch.split(",")) {
             String trimmed = token.trim();

@@ -5,12 +5,13 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * MBTiles 瓦片服务核心配置属性类
+ * MBTiles 瓦片服务核心配置属性类（兼容 Java 8）
  * 映射 application.yml 中 prefix 为 "mbtiles" 的配置块
  */
 @Data
@@ -105,15 +106,15 @@ public class MbtilesProperties {
     @Data
     public static class SchemaProperties {
         /** 候选表名列表（按优先级尝试，发现存在即采用） */
-        private List<String> candidateTableNames = new ArrayList<>(List.of("tiles", "grids", "grid"));
+        private List<String> candidateTableNames = new ArrayList<>(Arrays.asList("tiles", "grids", "grid"));
         /** 候选瓦片二进制流字段名列表 */
-        private List<String> candidateDataColumns = new ArrayList<>(List.of("tile_data", "grid", "data", "image", "content"));
+        private List<String> candidateDataColumns = new ArrayList<>(Arrays.asList("tile_data", "grid", "data", "image", "content"));
         /** 候选缩放层级字段名列表 */
-        private List<String> candidateZoomColumns = new ArrayList<>(List.of("zoom_level", "zoom", "z", "level"));
+        private List<String> candidateZoomColumns = new ArrayList<>(Arrays.asList("zoom_level", "zoom", "z", "level"));
         /** 候选列号 (X) 字段名列表 */
-        private List<String> candidateColumnColumns = new ArrayList<>(List.of("tile_column", "col", "column", "x"));
+        private List<String> candidateColumnColumns = new ArrayList<>(Arrays.asList("tile_column", "col", "column", "x"));
         /** 候选行号 (Y) 字段名列表 */
-        private List<String> candidateRowColumns = new ArrayList<>(List.of("tile_row", "row", "y"));
+        private List<String> candidateRowColumns = new ArrayList<>(Arrays.asList("tile_row", "row", "y"));
         /** 特殊数据集个性化定制覆盖映射: datasetName -> CustomDatasetSchema */
         private Map<String, CustomDatasetSchema> datasetOverrides = new HashMap<>();
     }

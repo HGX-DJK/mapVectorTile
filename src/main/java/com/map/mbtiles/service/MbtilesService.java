@@ -15,7 +15,7 @@ import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.sqlite.SQLiteConfig;
 
-import jakarta.annotation.PreDestroy;
+import javax.annotation.PreDestroy;
 import javax.sql.DataSource;
 import java.io.File;
 import java.io.IOException;
@@ -27,6 +27,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -35,6 +36,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.CRC32;
 
@@ -52,7 +54,7 @@ public class MbtilesService {
     private static final Pattern SAFE_DATASET_NAME = Pattern.compile("^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$");
 
     /** 支持的 SQLite 矢量切片文件扩展名优先级列表 */
-    private static final List<String> SUPPORTED_EXTENSIONS = List.of(
+    private static final List<String> SUPPORTED_EXTENSIONS = Arrays.asList(
             ".mbtiles",
             ".db",
             ".sqlite",
@@ -424,7 +426,7 @@ public class MbtilesService {
                         String fileName = p.getFileName().toString().toLowerCase();
                         return SUPPORTED_EXTENSIONS.stream().anyMatch(fileName::endsWith);
                     })
-                    .toList();
+                    .collect(Collectors.toList());
 
             for (Path p : candidateFiles) {
                 Path relative = rootPath.relativize(p);
@@ -645,7 +647,8 @@ public class MbtilesService {
      */
     public Map<String, Object> getCacheStats() {
         Cache cache = cacheManager.getCache("tiles");
-        if (cache != null && cache.getNativeCache() instanceof com.github.benmanes.caffeine.cache.Cache<?, ?> nativeCache) {
+        if (cache != null && cache.getNativeCache() instanceof com.github.benmanes.caffeine.cache.Cache) {
+            com.github.benmanes.caffeine.cache.Cache<?, ?> nativeCache = (com.github.benmanes.caffeine.cache.Cache<?, ?>) cache.getNativeCache();
             com.github.benmanes.caffeine.cache.stats.CacheStats stats = nativeCache.stats();
             Map<String, Object> map = new LinkedHashMap<>();
             map.put("estimatedSize", nativeCache.estimatedSize());
@@ -658,7 +661,7 @@ public class MbtilesService {
             map.put("activeDataSources", getDataSourceCount());
             return map;
         }
-        return Map.of("status", "缓存统计指标未开启或不可用");
+        return Collections.singletonMap("status", "缓存统计指标未开启或不可用");
     }
 
     /**
@@ -702,10 +705,11 @@ public class MbtilesService {
 
         // 4. 精准驱逐 Caffeine 瓦片缓存中以当前数据集为前缀的瓦片（如 "beijing:*"）
         Cache tileCache = cacheManager.getCache("tiles");
-        if (tileCache != null && tileCache.getNativeCache() instanceof com.github.benmanes.caffeine.cache.Cache<?, ?> nativeCache) {
+        if (tileCache != null && tileCache.getNativeCache() instanceof com.github.benmanes.caffeine.cache.Cache) {
+            com.github.benmanes.caffeine.cache.Cache<?, ?> nativeCache = (com.github.benmanes.caffeine.cache.Cache<?, ?>) tileCache.getNativeCache();
             String prefix = normalizedName + ":";
             long beforeCount = nativeCache.estimatedSize();
-            nativeCache.asMap().keySet().removeIf(k -> k instanceof String keyStr && keyStr.startsWith(prefix));
+            nativeCache.asMap().keySet().removeIf(k -> (k instanceof String) && ((String) k).startsWith(prefix));
             long evicted = beforeCount - nativeCache.estimatedSize();
             log.info("已精准驱逐数据集 '{}' 的内存瓦片缓存（清除约 {} 条缓存项），其余数据集缓存完整保留", normalizedName, evicted);
         }

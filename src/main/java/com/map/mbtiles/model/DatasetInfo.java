@@ -11,9 +11,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
- * MBTiles 丰富元数据模型
+ * MBTiles 丰富元数据模型（兼容 Java 8）
  * 解析并封装 GIS 行业标准元数据属性（完全兼容 TileJSON 3.0 与 MBTiles 1.3 规范），
  * 并提供缩放层级（Zoom）与地理空间外包矩形（BBox）的前置短路剪枝能力。
  */
@@ -56,11 +57,78 @@ public class DatasetInfo {
     private Map<String, String> rawMetadata;
 
     /**
-     * 瓦片行列号边界范围紧凑结构体（启动/加载时预计算完成，杜绝运行时的浮点与三角函数开销）
+     * 瓦片行列号边界范围紧凑结构体（启动/加载时预计算完成，杜绝运行时的浮点与三角函数开销，兼容 Java 8）
      */
-    public record TileRange(int minX, int maxX, int minY, int maxY) {
+    public static final class TileRange {
+        private final int minX;
+        private final int maxX;
+        private final int minY;
+        private final int maxY;
+
+        public TileRange(int minX, int maxX, int minY, int maxY) {
+            this.minX = minX;
+            this.maxX = maxX;
+            this.minY = minY;
+            this.maxY = maxY;
+        }
+
+        public int minX() {
+            return minX;
+        }
+
+        public int maxX() {
+            return maxX;
+        }
+
+        public int minY() {
+            return minY;
+        }
+
+        public int maxY() {
+            return maxY;
+        }
+
+        public int getMinX() {
+            return minX;
+        }
+
+        public int getMaxX() {
+            return maxX;
+        }
+
+        public int getMinY() {
+            return minY;
+        }
+
+        public int getMaxY() {
+            return maxY;
+        }
+
         public boolean contains(int x, int y) {
             return x >= minX && x <= maxX && y >= minY && y <= maxY;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            TileRange tileRange = (TileRange) o;
+            return minX == tileRange.minX && maxX == tileRange.maxX && minY == tileRange.minY && maxY == tileRange.maxY;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(minX, maxX, minY, maxY);
+        }
+
+        @Override
+        public String toString() {
+            return "TileRange{" +
+                    "minX=" + minX +
+                    ", maxX=" + maxX +
+                    ", minY=" + minY +
+                    ", maxY=" + maxY +
+                    '}';
         }
     }
 
@@ -169,16 +237,17 @@ public class DatasetInfo {
 
         List<Map<String, Object>> vectorLayers = Collections.emptyList();
         String jsonField = meta.get("json");
-        if (jsonField != null && !jsonField.isBlank()) {
+        if (jsonField != null && !jsonField.trim().isEmpty()) {
             try {
-                Map<String, Object> parsedJson = MAPPER.readValue(jsonField, new TypeReference<>() {});
+                Map<String, Object> parsedJson = MAPPER.readValue(jsonField, new TypeReference<Map<String, Object>>() {});
                 Object layersObj = parsedJson.get("vector_layers");
-                if (layersObj instanceof List<?> list) {
+                if (layersObj instanceof List) {
+                    List<?> list = (List<?>) layersObj;
                     vectorLayers = new ArrayList<>();
                     for (Object item : list) {
-                        if (item instanceof Map<?, ?> map) {
+                        if (item instanceof Map) {
                             @SuppressWarnings("unchecked")
-                            Map<String, Object> casted = (Map<String, Object>) map;
+                            Map<String, Object> casted = (Map<String, Object>) item;
                             vectorLayers.add(casted);
                         }
                     }
@@ -211,7 +280,7 @@ public class DatasetInfo {
      * 辅助方法：将字符串安全解析为整数
      */
     private static Integer parseInteger(String val) {
-        if (val == null || val.isBlank()) {
+        if (val == null || val.trim().isEmpty()) {
             return null;
         }
         try {
@@ -225,7 +294,7 @@ public class DatasetInfo {
      * 辅助方法：将逗号分隔的字符串解析为 double 数组
      */
     private static double[] parseDoubleArray(String val) {
-        if (val == null || val.isBlank()) {
+        if (val == null || val.trim().isEmpty()) {
             return null;
         }
         try {
