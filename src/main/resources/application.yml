@@ -21,18 +21,22 @@ server:
     connection-timeout: 60000 # 连接超时时间 (ms)
 
 mbtiles:
-  # MBTiles 数据文件存储目录（支持相对路径或绝对路径）
+  # MBTiles / SQLite 数据文件存储目录（支持相对路径或绝对路径）
   data-dir: ./data
-  # SQLite HikariCP 连接池配置
+  # SQLite HikariCP 连接池配置（针对多文件海量数据源自动缩容）
   pool:
-    max-size: 20              # 单数据集最大连接数（SQLite单机文件推荐 10~20）
-    min-idle: 5               # 最小空闲连接
+    max-size: 15              # 单数据集最大并发连接数（SQLite 推荐 10~15）
+    min-idle: 0               # 最小空闲连接：设为 0，无请求时连接自动释放归零，杜绝文件句柄耗尽
+    idle-timeout: 60000       # 60 秒无请求自动回收该连接
     connection-timeout: 30000 # 获取连接超时时间 (ms)
     max-lifetime: 1800000     # 连接最大生命周期 (30分钟)
-  # 启动预加载热瓦片配置
+    max-active-pools: 50      # 最多常驻 50 个数据源连接池，超出时按 LRU 淘汰最久未访问连接池
+  # 启动预加载热瓦片配置（智能防多文件缓存挤兑）
   warmup:
     enabled: true             # 是否在启动时预热低缩放层级瓦片
     max-zoom: 6               # 预热最大缩放层级 (0~maxZoom，单SQL批量预热)
+    max-datasets: 3           # 文件过多时默认仅预热前 3 个核心底图，防止冲垮 Caffeine 缓存
+    include-datasets: []      # 可选：指定显式预热的数据集名称列表（如 ["basemap_line_point"]）
   # HTTP 缓存响应头
   cache-control:
     max-age: 604800           # 浏览器/CDN 缓存有效时长（秒，默认 7 天）

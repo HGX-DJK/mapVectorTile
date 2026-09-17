@@ -1,18 +1,20 @@
 # 🗺️ MBTiles Vector Tile Server
 
-高性能矢量瓦片服务器，基于 Spring Boot 构建，从 `.mbtiles` 文件读取并提供 PBF / MVT 格式的矢量瓦片数据，原生支持 TileJSON 3.0 规范，具备零数据库负载的负向缓存与空间拓扑剪枝能力。
+高性能矢量瓦片服务器，基于 Spring Boot 构建，从 `.mbtiles`、`.db`、`.sqlite` 等 SQLite 数据库文件读取并提供 PBF / MVT 格式的矢量瓦片数据，原生支持 TileJSON 3.0 规范，具备零数据库负载的负向缓存、多文件自动缩容连接池与空间拓扑剪枝能力。
 
 ---
 
 ## ✨ 核心特性
 
 - **🚀 毫秒级极速响应** — Caffeine 内存缓存 (50,000 条) + SQLite 2GB mmap 内存映射 I/O，热点瓦片 < 0.1ms 响应。
-- **⚡ 单 SQL 批量预热** — 启动时使用单条范围查询秒级预载低缩放级别瓦片，彻底告别冷启动抖动。
+- **📁 多格式与子目录自适应** — 自动识别并兼容 `.mbtiles`、`.db`、`.sqlite`、`.sqlite3` 等数据库文件，支持多级子文件夹组织（如 `/tiles/admin/beijing/...`）。
+- **⚡ 海量文件连接池自动缩容** — 支持数百个数据文件共存；连接池采用 `minIdle = 0` + `idleTimeout = 60s` 机制，空闲连接自动释放归零，并配合 LRU 淘汰机制，杜绝系统文件句柄耗尽。
+- **🛡️ 智能预热防缓存踩踏** — 针对多文件场景实施预热限额保护（默认预热前 3 个核心底图，或配置预热白名单），防止上百个文件启动时冲垮 Caffeine 缓存。
 - **🎯 空间范围与层级双重短路** — 自动解析数据集 `minzoom`、`maxzoom` 及地理空间边界（BBox），超出物理范围请求零数据库 I/O 直接响应 204。
 - **🛡️ 空瓦片负向缓存防穿透** — 使用 `TileEntry.EMPTY` 单例缓存空白网格，彻底阻断大范围无要素区域对 SQLite 的穿透查询。
 - **📦 标准 TileJSON 3.0** — 支持 `/tiles/{dataset}/tilejson.json`，MapLibre GL JS / Mapbox GL JS 一行 URL 自动配置。
 - **🌐 全面兼容多客户端** — 瓦片接口原生同时支持 `.pbf`、`.mvt` 以及无后缀路由，无缝对接 QGIS、ArcGIS 与 Web 前端。
-- **📁 数据集目录与热重载** — 自动发现 `data/` 目录下的所有数据集（`/tiles/datasets`），并支持运行时免停机热重载（`POST /tiles/reload`）。
+- **🔄 数据集目录与热重载** — 自动递归发现 `data/` 目录下的所有数据集（`/tiles/datasets`），并支持运行时免停机热重载（`POST /tiles/reload`）。
 - **📊 缓存指标实时监控** — 提供 `/tiles/cache-stats` 接口，实时掌握 Caffeine 命中率、缓存量与驱逐指标。
 - **🛡️ 生产级安全防护** — 严密防范路径穿越（Path Traversal）漏洞，白名单字符与标准路径双重校验。
 - **🔄 RFC 7232 条件请求** — 硬件加速 CRC32 ETag 生成，支持弱 ETag（`W/`）与多 ETag 识别，精准返回 304 零传输。
@@ -33,15 +35,18 @@
 
 ## 🚀 快速开始
 
-### 1. 放置 MBTiles 数据文件
+### 1. 放置切片数据文件
 
-将你的 `.mbtiles` 文件放入项目根目录的 `data/` 文件夹：
+将你的 `.mbtiles`、`.db` 或 `.sqlite` 文件放入项目根目录的 `data/` 文件夹（支持多层子目录）：
 
 ```text
 mapVectorTile/
 ├── data/
-│   ├── basemap_line_point.mbtiles    ← 你的瓦片数据
-│   └── another_dataset.mbtiles       ← 支持多个数据集
+│   ├── basemap_line_point.mbtiles    ← 根目录数据集
+│   ├── beijing.db                    ← 支持 .db / .sqlite 后缀
+│   └── vector/
+│       ├── roads.mbtiles             ← 支持子目录分类存放
+│       └── buildings.sqlite
 ```
 
 ### 2. 编译 & 运行
@@ -69,7 +74,7 @@ mvn spring-boot:run
 GET /tiles/datasets
 GET /tiles
 ```
-返回所有已发现数据集的名称、文件大小、缩放范围、边界范围及图层信息。
+递归扫描 `data/` 目录，返回所有发现的数据集名称（含子目录相对路径）、文件大小、缩放范围及边界。
 
 ---
 
@@ -77,10 +82,9 @@ GET /tiles
 ```http
 GET /tiles/{datasetName}/tilejson.json
 ```
-**示例：**
-```bash
-curl http://127.0.0.1:8445/tiles/basemap_line_point/tilejson.json
-```
+- 支持根目录数据集：`/tiles/basemap_line_point/tilejson.json`
+- 支持子目录数据集：`/tiles/vector/roads/tilejson.json`（或别名 `/tiles/vector__roads/tilejson.json`）
+
 **响应示例：**
 ```json
 {
@@ -104,19 +108,17 @@ curl http://127.0.0.1:8445/tiles/basemap_line_point/tilejson.json
 
 ---
 
-### 3. 获取矢量瓦片 (支持 .pbf / .mvt / 无后缀)
+### 3. 获取矢量瓦片 (支持 .pbf / .mvt / 无后缀 / 子目录)
 ```http
 GET /tiles/{datasetName}/{z}/{x}/{y}.pbf
 GET /tiles/{datasetName}/{z}/{x}/{y}.mvt
 GET /tiles/{datasetName}/{z}/{x}/{y}
+GET /tiles/{subFolder}/{datasetName}/{z}/{x}/{y}.pbf
 ```
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `datasetName` | String | `.mbtiles` 文件名（不含扩展名，需满足 `[a-zA-Z0-9_-]`） |
-| `z` | int | 缩放级别（0–22） |
-| `x` | int | 瓦片列号（0 ~ 2^z - 1） |
-| `y` | int | 瓦片行号（XYZ 坐标系，服务端自动转为 MBTiles TMS 坐标） |
+**示例：**
+- 普通获取：`GET /tiles/beijing/10/843/388.pbf`
+- 子目录获取：`GET /tiles/vector/roads/10/843/388.mvt`
 
 **响应头：**
 - `Content-Type`: `application/x-protobuf`
@@ -158,7 +160,7 @@ GET /tiles/cache-stats
 ```http
 POST /tiles/reload
 ```
-响应：`{"status":"success","message":"MBTiles 数据集与缓存已全部热重载"}`
+响应：`{"status":"success","message":"MBTiles / DB 数据集与缓存已全部热重载"}`
 
 #### 服务健康状态
 ```http
@@ -168,32 +170,31 @@ GET /tiles/health
 
 ---
 
-## ⚙️ 配置说明
+## ⚙️ 多文件海量数据源核心配置
 
 配置文件位于 `src/main/resources/application.yml`：
 
 ```yaml
 server:
-  port: 8445                    # 监听端口
-  http2:
-    enabled: false               # HTTP/2 多路复用（开启需配合 HTTPS）
-  ssl:
-    enabled: false               # 是否启用 HTTPS
+  port: 8445
   compression:
-    enabled: true               # HTTP 响应压缩
+    enabled: true
     min-response-size: 1024
 
 mbtiles:
-  data-dir: ./data              # MBTiles 数据存放路径（相对或绝对路径）
+  data-dir: ./data              # 数据文件目录（递归检索）
   pool:
-    max-size: 20                # 单数据集最大连接数（SQLite 推荐 10~20）
-    min-idle: 5                 # 最小空闲连接
-    connection-timeout: 30000   # 获取连接超时（毫秒）
+    max-size: 15                # 单数据集最大连接数（SQLite 推荐 10~15）
+    min-idle: 0                 # 最小空闲连接设为 0：空闲超时后自动释放归零，杜绝文件句柄耗尽
+    idle-timeout: 60000         # 60 秒无访问自动释放该连接
+    max-active-pools: 50        # 最多常驻 50 个数据源连接池，超出时自动 LRU 淘汰最久未访问池
   warmup:
-    enabled: true               # 启动时是否自动预热
-    max-zoom: 6                 # 预热最大缩放层级（单 SQL 批量预加载）
+    enabled: true               # 是否开启启动预热
+    max-zoom: 6                 # 预热最大层级
+    max-datasets: 3             # 多文件时默认仅预热前 3 个数据集，防止冲垮 Caffeine
+    include-datasets: []        # 可选：指定显式预热白名单（如 ["vector/roads", "beijing"]）
   cache-control:
-    max-age: 604800             # 浏览器缓存时长（默认 7 天）
+    max-age: 604800             # 浏览器缓存 7 天
     immutable: true
 
 spring:
@@ -205,81 +206,47 @@ spring:
 
 ---
 
-## 🔌 前端接入示例
+## 🔌 前端多图层叠加接入示例
 
-### 1. MapLibre GL JS（推荐：通过 TileJSON 一行接入）
+### MapLibre GL JS（同时挂载多个数据源组合渲染）
 
 ```javascript
 const map = new maplibregl.Map({
   container: 'map',
+  center: [116.4, 39.9],
+  zoom: 10,
   style: {
     version: 8,
+    // 1. 同时定义多个独立数据源（支持 .db、.mbtiles、子目录）
     sources: {
-      'mbtiles-source': {
+      'base-source': {
         type: 'vector',
         url: 'http://localhost:8445/tiles/basemap_line_point/tilejson.json'
+      },
+      'roads-source': {
+        type: 'vector',
+        url: 'http://localhost:8445/tiles/vector/roads/tilejson.json'
       }
     },
+    // 2. 按图层层叠渲染
     layers: [
       {
-        id: 'lines-layer',
+        id: 'base-line-layer',
         type: 'line',
-        source: 'mbtiles-source',
-        'source-layer': 'lines', // MBTiles 中的 vector_layer 名称
-        paint: { 'line-color': '#3b82f6', 'line-width': 1.5 }
+        source: 'base-source',
+        'source-layer': 'lines',
+        paint: { 'line-color': '#94a3b8', 'line-width': 1 }
+      },
+      {
+        id: 'highways-layer',
+        type: 'line',
+        source: 'roads-source',
+        'source-layer': 'highways',
+        paint: { 'line-color': '#f59e0b', 'line-width': 2.5 }
       }
     ]
   }
 });
-```
-
-### 2. Mapbox GL JS（模板 URL 方式）
-
-```javascript
-map.addSource('mbtiles-source', {
-  type: 'vector',
-  tiles: ['http://localhost:8445/tiles/basemap_line_point/{z}/{x}/{y}.pbf'],
-  maxzoom: 14
-});
-```
-
-### 3. OpenLayers（可使用 .mvt 或 .pbf）
-
-```javascript
-import VectorTileLayer from 'ol/layer/VectorTile';
-import VectorTileSource from 'ol/source/VectorTile';
-import MVT from 'ol/format/MVT';
-
-const layer = new VectorTileLayer({
-  source: new VectorTileSource({
-    format: new MVT(),
-    url: 'http://localhost:8445/tiles/basemap_line_point/{z}/{x}/{y}.mvt'
-  })
-});
-```
-
----
-
-## 🔧 性能架构
-
-```text
-浏览器请求 ──→ 浏览器本地缓存 (7天)
-                 │ 未命中
-                 ▼
-             HTTP ETag 校验 ──→ 304 Not Modified (RFC 7232 规范匹配，0 字节传输)
-                 │ 未命中
-                 ▼
-             双重前置短路校验 ──→ 204 No Content (超出 minzoom~maxzoom 或 BBox 零 I/O 返回)
-                 │ 合法层级与空间范围
-                 ▼
-             Caffeine 内存缓存 (50,000 条) ──→ 200 OK (命中实瓦片，~0.1ms)
-                 │ 命中 TileEntry.EMPTY 单例 ──→ 204 No Content (零 DB 穿透)
-                 │ 未命中
-                 ▼
-             HikariCP 连接池 (10~20 连接)
-                 │
-                 ▼
-             SQLite 查询 (WAL + 联合索引 + 2GB mmap I/O) ──→ 200 OK / 空瓦片单例 (~5-15ms)
 ```
 
 ---

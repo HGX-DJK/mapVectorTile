@@ -17,6 +17,8 @@ import jakarta.annotation.PreDestroy;
 import javax.sql.DataSource;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -24,29 +26,42 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import java.util.zip.CRC32;
 
 /**
  * MBTiles 核心服务类
- * 负责 SQLite 连接池生命周期管理、PRAGMA 性能调优、批量预热拉取、空瓦片负向缓存以及带缓存的瓦片读取
+ * 负责 SQLite 连接池生命周期管理、多文件扩展名自适应、子目录递归发现、
+ * PRAGMA 性能调优、连接池空闲自动缩容、批量预热拉取与空瓦片负向缓存
  */
 @Service
 public class MbtilesService {
 
     private static final Logger log = LoggerFactory.getLogger(MbtilesService.class);
 
-    /** 数据集安全名称白名单正则：仅允许字母、数字、下划线及短横线 */
-    private static final Pattern SAFE_DATASET_NAME = Pattern.compile("^[a-zA-Z0-9_-]+$");
+    /** 数据集安全名称白名单正则：支持字母、数字、下划线、短横线以及子目录斜杠 */
+    private static final Pattern SAFE_DATASET_NAME = Pattern.compile("^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$");
+
+    /** 支持的 SQLite 矢量切片文件扩展名优先级列表 */
+    private static final List<String> SUPPORTED_EXTENSIONS = List.of(
+            ".mbtiles",
+            ".db",
+            ".sqlite",
+            ".sqlite3"
+    );
 
     private final MbtilesProperties properties;
     private final CacheManager cacheManager;
     /** 每个数据集独立的 HikariCP 连接池映射 */
     private final Map<String, HikariDataSource> dataSources = new ConcurrentHashMap<>();
+    /** 数据集最近访问时间戳记录（用于海量数据源时的 LRU 淘汰） */
+    private final Map<String, Long> lastAccessTimes = new ConcurrentHashMap<>();
     /** 数据集元数据结构体内存缓存 */
     private final Map<String, DatasetInfo> datasetInfoCache = new ConcurrentHashMap<>();
 
@@ -56,14 +71,26 @@ public class MbtilesService {
     }
 
     /**
-     * 校验数据集名称合法性，防御路径遍历攻击（Path Traversal）
+     * 将请求的数据集名称标准化（支持将双下划线 __ 映射为子目录斜杠 /）
      */
-    public boolean isValidDatasetName(String datasetName) {
-        return datasetName != null && SAFE_DATASET_NAME.matcher(datasetName).matches();
+    public String normalizeDatasetName(String datasetName) {
+        if (datasetName == null) {
+            return null;
+        }
+        return datasetName.replace("__", "/").trim();
     }
 
     /**
-     * 安全解析并验证位于数据目录下的 MBTiles 文件对象
+     * 校验数据集名称合法性，防御路径遍历攻击（Path Traversal）
+     */
+    public boolean isValidDatasetName(String datasetName) {
+        String normalized = normalizeDatasetName(datasetName);
+        return normalized != null && SAFE_DATASET_NAME.matcher(normalized).matches();
+    }
+
+    /**
+     * 安全解析并验证位于数据目录下的 MBTiles / DB 文件对象
+     * 支持自适应匹配 .mbtiles、.db、.sqlite、.sqlite3 及子目录层级
      */
     public File getSafeDatasetFile(String datasetName) {
         if (!isValidDatasetName(datasetName)) {
@@ -71,21 +98,33 @@ public class MbtilesService {
             return null;
         }
 
+        String normalizedName = normalizeDatasetName(datasetName);
+
         try {
             File dataDir = new File(properties.getDataDir()).getCanonicalFile();
-            File mbtilesFile = new File(dataDir, datasetName + ".mbtiles").getCanonicalFile();
-
-            // 严密校验是否脱离了配置的根数据目录
-            if (!mbtilesFile.toPath().startsWith(dataDir.toPath())) {
-                log.warn("检测到恶意路径穿越行为，数据集名称: {}", datasetName);
+            if (!dataDir.exists() || !dataDir.isDirectory()) {
                 return null;
             }
 
-            if (!mbtilesFile.exists() || !mbtilesFile.isFile()) {
-                return null;
+            // 1. 如果请求本身已携带合法扩展名，直接查找
+            for (String ext : SUPPORTED_EXTENSIONS) {
+                if (normalizedName.toLowerCase().endsWith(ext)) {
+                    File directFile = new File(dataDir, normalizedName).getCanonicalFile();
+                    if (isSafeFileUnderDir(directFile, dataDir)) {
+                        return directFile;
+                    }
+                }
             }
 
-            return mbtilesFile;
+            // 2. 依次尝试拼接各支持的扩展名（.mbtiles -> .db -> .sqlite -> .sqlite3）
+            for (String ext : SUPPORTED_EXTENSIONS) {
+                File candidate = new File(dataDir, normalizedName + ext).getCanonicalFile();
+                if (isSafeFileUnderDir(candidate, dataDir)) {
+                    return candidate;
+                }
+            }
+
+            return null;
         } catch (IOException e) {
             log.warn("解析数据集文件路径异常 {}: {}", datasetName, e.getMessage());
             return null;
@@ -93,21 +132,35 @@ public class MbtilesService {
     }
 
     /**
+     * 严密校验文件是否真实存在且物理上严格限制在指定根目录内（防止软链接或目录穿越）
+     */
+    private boolean isSafeFileUnderDir(File file, File rootDir) {
+        return file.exists() && file.isFile() && file.toPath().startsWith(rootDir.toPath());
+    }
+
+    /**
      * 获取（或懒加载初始化）指定数据集的高性能 HikariCP 连接池
+     * 支持空闲自动缩容（minIdle=0，60秒自动释放连接）与超限 LRU 保护
      */
     public DataSource getDataSource(String datasetName) {
         if (!isValidDatasetName(datasetName)) {
             return null;
         }
 
-        return dataSources.computeIfAbsent(datasetName, name -> {
+        String normalizedName = normalizeDatasetName(datasetName);
+        lastAccessTimes.put(normalizedName, System.currentTimeMillis());
+
+        return dataSources.computeIfAbsent(normalizedName, name -> {
             File mbtilesFile = getSafeDatasetFile(name);
             if (mbtilesFile == null) {
-                log.error("未找到 MBTiles 文件或路径非法: {} (目录: {})", name, properties.getDataDir());
+                log.error("未找到对应的数据文件: {} (支持格式: .mbtiles, .db, .sqlite)", name);
                 return null;
             }
 
-            log.info("正在为数据集初始化数据库连接池: {}", mbtilesFile.getAbsolutePath());
+            // 当数据源连接池总数超出保护阈值时，淘汰最久未访问的连接池，防止句柄耗尽
+            evictOldestDataSourcesIfNecessary();
+
+            log.info("正在为数据文件初始化独立连接池: {}", mbtilesFile.getAbsolutePath());
 
             // 1. 确保联合索引就绪并开启 WAL 日志模式
             ensureIndexAndWal(mbtilesFile);
@@ -119,7 +172,7 @@ public class MbtilesService {
             sqLiteConfig.setJournalMode(SQLiteConfig.JournalMode.WAL);
             sqLiteConfig.setSynchronous(SQLiteConfig.SynchronousMode.OFF);
             sqLiteConfig.setTempStore(SQLiteConfig.TempStore.MEMORY);
-            // 开启 2GB 内存映射 I/O（mmap），充分利用操作系统的 Page Cache 减少用户态/内核态拷贝
+            // 开启 2GB 内存映射 I/O（mmap），充分利用操作系统的 Page Cache 减少内核态拷贝
             sqLiteConfig.setPragma(SQLiteConfig.Pragma.MMAP_SIZE, "2147483648");
 
             MbtilesProperties.PoolProperties poolProps = properties.getPool();
@@ -130,13 +183,45 @@ public class MbtilesService {
             config.setDataSourceProperties(sqLiteConfig.toProperties());
             config.setReadOnly(true);
             config.setMaximumPoolSize(poolProps.getMaxSize());
+            // 设为 0：当某个数据集空闲超过 idleTimeout 时，连接全部释放，节约海量文件句柄
             config.setMinimumIdle(poolProps.getMinIdle());
+            config.setIdleTimeout(poolProps.getIdleTimeout());
             config.setConnectionTimeout(poolProps.getConnectionTimeout());
             config.setMaxLifetime(poolProps.getMaxLifetime());
-            config.setPoolName("HikariCP-" + name);
+            config.setPoolName("HikariCP-" + name.replace('/', '-'));
 
             return new HikariDataSource(config);
         });
+    }
+
+    /**
+     * 当同时打开的活跃数据源数量超出上限时，安全回收最久未访问的连接池
+     */
+    private synchronized void evictOldestDataSourcesIfNecessary() {
+        int maxActive = properties.getPool().getMaxActivePools();
+        if (dataSources.size() < maxActive) {
+            return;
+        }
+
+        // 查找最久未访问的数据源
+        String oldestName = null;
+        long oldestTime = Long.MAX_VALUE;
+
+        for (Map.Entry<String, Long> entry : lastAccessTimes.entrySet()) {
+            if (dataSources.containsKey(entry.getKey()) && entry.getValue() < oldestTime) {
+                oldestTime = entry.getValue();
+                oldestName = entry.getKey();
+            }
+        }
+
+        if (oldestName != null) {
+            log.info("活跃数据源数量达到阈值 ({})，正在回收最久未访问连接池: {}", maxActive, oldestName);
+            HikariDataSource ds = dataSources.remove(oldestName);
+            if (ds != null) {
+                ds.close();
+            }
+            lastAccessTimes.remove(oldestName);
+        }
     }
 
     /**
@@ -184,7 +269,9 @@ public class MbtilesService {
             return null;
         }
 
-        return datasetInfoCache.computeIfAbsent(datasetName, name -> {
+        String normalizedName = normalizeDatasetName(datasetName);
+
+        return datasetInfoCache.computeIfAbsent(normalizedName, name -> {
             File file = getSafeDatasetFile(name);
             if (file == null) {
                 return null;
@@ -195,7 +282,7 @@ public class MbtilesService {
     }
 
     /**
-     * 扫描数据存储目录，返回所有可用数据集的元数据概览列表
+     * 递归扫描数据存储目录（包括子目录），发现所有 .mbtiles, .db, .sqlite 数据集
      */
     public List<DatasetInfo> listDatasets() {
         File dataDir = new File(properties.getDataDir());
@@ -203,19 +290,39 @@ public class MbtilesService {
             return Collections.emptyList();
         }
 
-        File[] files = dataDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".mbtiles"));
-        if (files == null || files.length == 0) {
-            return Collections.emptyList();
+        List<DatasetInfo> result = new ArrayList<>();
+        Path rootPath = dataDir.toPath();
+
+        try (Stream<Path> walk = Files.walk(rootPath, 5)) {
+            List<Path> candidateFiles = walk.filter(Files::isRegularFile)
+                    .filter(p -> {
+                        String fileName = p.getFileName().toString().toLowerCase();
+                        return SUPPORTED_EXTENSIONS.stream().anyMatch(fileName::endsWith);
+                    })
+                    .toList();
+
+            for (Path p : candidateFiles) {
+                Path relative = rootPath.relativize(p);
+                String relativeStr = relative.toString().replace('\\', '/');
+
+                // 去除已知扩展名作为数据集路由名称
+                String datasetName = relativeStr;
+                for (String ext : SUPPORTED_EXTENSIONS) {
+                    if (datasetName.toLowerCase().endsWith(ext)) {
+                        datasetName = datasetName.substring(0, datasetName.length() - ext.length());
+                        break;
+                    }
+                }
+
+                DatasetInfo info = getDatasetInfo(datasetName);
+                if (info != null) {
+                    result.add(info);
+                }
+            }
+        } catch (IOException e) {
+            log.warn("扫描数据目录失败 {}: {}", properties.getDataDir(), e.getMessage());
         }
 
-        List<DatasetInfo> result = new ArrayList<>();
-        for (File f : files) {
-            String name = f.getName().substring(0, f.getName().length() - 8);
-            DatasetInfo info = getDatasetInfo(name);
-            if (info != null) {
-                result.add(info);
-            }
-        }
         return result;
     }
 
@@ -274,10 +381,6 @@ public class MbtilesService {
     /**
      * 单条范围 SQL 批量预加载指定层级以内的所有瓦片到 Caffeine 缓存
      * 彻底消除成千上万次独立的 JDBC 单查往返
-     *
-     * @param datasetName 数据集名称
-     * @param maxZoom     最大预热层级
-     * @return 实际成功写入缓存的瓦片总数
      */
     public int warmupDatasetBatch(String datasetName, int maxZoom) {
         DataSource dataSource = getDataSource(datasetName);
@@ -332,7 +435,7 @@ public class MbtilesService {
     }
 
     /**
-     * 读取 MBTiles 文件中的 metadata 元数据表键值对
+     * 读取 MBTiles / DB 文件中的 metadata 元数据表键值对
      */
     @Cacheable(value = "metadata", key = "#datasetName")
     public Map<String, String> getMetadata(String datasetName) {
@@ -410,6 +513,7 @@ public class MbtilesService {
         log.info("正在关闭所有 MBTiles 数据库连接池...");
         dataSources.values().forEach(HikariDataSource::close);
         dataSources.clear();
+        lastAccessTimes.clear();
         datasetInfoCache.clear();
     }
 }

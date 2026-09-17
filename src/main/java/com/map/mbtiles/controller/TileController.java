@@ -17,7 +17,7 @@ import java.util.Map;
 
 /**
  * 矢量瓦片 REST 控制器
- * 提供瓦片二进制流响应（支持 .pbf / .mvt 双后缀）、TileJSON 3.0 标准规范端点、
+ * 提供瓦片二进制流响应（支持 .pbf / .mvt 双后缀及子目录层级）、TileJSON 3.0 标准规范端点、
  * 数据集目录、空间范围（BBox）拓扑剪枝、缓存指标监控与数据集热重载
  */
 @RestController
@@ -53,16 +53,16 @@ public class TileController {
     }
 
     /**
-     * 数据集热重载端点 — 动态重新载入磁盘上的 MBTiles 文件并重置连接池与缓存
+     * 数据集热重载端点 — 动态重新载入磁盘上的 MBTiles / DB 文件并重置连接池与缓存
      */
     @PostMapping(value = "/reload", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, String>> reloadDatasets() {
         mbtilesService.reloadDatasets();
-        return ResponseEntity.ok(Map.of("status", "success", "message", "MBTiles 数据集与缓存已全部热重载"));
+        return ResponseEntity.ok(Map.of("status", "success", "message", "MBTiles / DB 数据集与缓存已全部热重载"));
     }
 
     /**
-     * 数据集目录发现接口 — 列出 data 目录下所有可用 MBTiles 数据集及其元数据概览
+     * 数据集目录发现接口 — 列出 data 目录下所有可用数据集（包含子目录）及其元数据概览
      */
     @GetMapping(value = {"", "/", "/datasets"}, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<List<DatasetInfo>> listDatasets() {
@@ -74,27 +74,29 @@ public class TileController {
 
     /**
      * 标准 TileJSON 3.0 规范端点
-     * MapLibre GL JS / Mapbox GL JS / OpenLayers 可直接通过该 URL 自动配置图层、边界与瓦片地址
-     *
-     * 示例：GET /tiles/basemap_line_point/tilejson.json
+     * 支持平铺名称与子目录路径（例如 /tiles/admin/beijing/tilejson.json）
      */
-    @GetMapping(value = "/{datasetName}/tilejson.json", produces = MediaType.APPLICATION_JSON_VALUE)
+    @GetMapping(value = {
+            "/{datasetName}/tilejson.json",
+            "/**/tilejson.json"
+    }, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getTileJson(
-            @PathVariable String datasetName,
+            @PathVariable(required = false) String datasetName,
             HttpServletRequest request) {
 
-        if (!mbtilesService.isValidDatasetName(datasetName)) {
+        String resolvedName = resolveDatasetNameFromRequest(request, datasetName, "/tilejson.json");
+        if (!mbtilesService.isValidDatasetName(resolvedName)) {
             return ResponseEntity.badRequest().build();
         }
 
-        DatasetInfo info = mbtilesService.getDatasetInfo(datasetName);
+        DatasetInfo info = mbtilesService.getDatasetInfo(resolvedName);
         if (info == null) {
             return ResponseEntity.notFound().build();
         }
 
         // 动态根据客户端请求上下文组装瓦片模板 URL
         String baseUrl = resolveBaseUrl(request);
-        String tileUrl = baseUrl + "/tiles/" + datasetName + "/{z}/{x}/{y}.pbf";
+        String tileUrl = baseUrl + "/tiles/" + resolvedName + "/{z}/{x}/{y}.pbf";
 
         Map<String, Object> tileJson = new LinkedHashMap<>();
         tileJson.put("tilejson", "3.0.0");
@@ -102,7 +104,7 @@ public class TileController {
         tileJson.put("description", info.getDescription());
         tileJson.put("version", info.getVersion());
         tileJson.put("attribution", info.getAttribution());
-        tileJson.put("format", info.getFormat()); // 补齐标准 format 字段
+        tileJson.put("format", info.getFormat());
         tileJson.put("scheme", "xyz");
         tileJson.put("tiles", List.of(tileUrl));
         tileJson.put("minzoom", info.getMinzoom());
@@ -120,33 +122,42 @@ public class TileController {
 
     /**
      * 向后兼容的元数据接口
-     * 返回符合 TileJSON 标准的元数据实体
      */
-    @GetMapping(value = "/{datasetName}/metadata.json", produces = MediaType.APPLICATION_JSON_VALUE)
+    @GetMapping(value = {
+            "/{datasetName}/metadata.json",
+            "/**/metadata.json"
+    }, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getMetadata(
-            @PathVariable String datasetName,
+            @PathVariable(required = false) String datasetName,
             HttpServletRequest request) {
 
         return getTileJson(datasetName, request);
     }
 
     /**
-     * 获取指定坐标的矢量瓦片（同时支持 .pbf、.mvt 及无后缀路由）
+     * 获取指定坐标的矢量瓦片
+     * 原生支持 .pbf、.mvt 及无后缀路由，并自适应匹配子目录（如 /tiles/vector/roads/10/857/418.pbf）
      */
     @GetMapping(value = {
             "/{datasetName}/{z}/{x}/{y}.pbf",
             "/{datasetName}/{z}/{x}/{y}.mvt",
-            "/{datasetName}/{z}/{x}/{y}"
+            "/{datasetName}/{z}/{x}/{y}",
+            "/**/{z}/{x}/{y}.pbf",
+            "/**/{z}/{x}/{y}.mvt",
+            "/**/{z}/{x}/{y}"
     })
     public ResponseEntity<byte[]> getVectorTile(
-            @PathVariable String datasetName,
+            @PathVariable(required = false) String datasetName,
             @PathVariable int z,
             @PathVariable int x,
             @PathVariable int y,
-            @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String ifNoneMatch) {
+            @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String ifNoneMatch,
+            HttpServletRequest request) {
+
+        String resolvedName = resolveDatasetNameForTile(request, datasetName, z, x, y);
 
         // 1. 安全校验：防止路径遍历注入
-        if (!mbtilesService.isValidDatasetName(datasetName)) {
+        if (!mbtilesService.isValidDatasetName(resolvedName)) {
             return ResponseEntity.badRequest().build();
         }
 
@@ -160,7 +171,7 @@ public class TileController {
         }
 
         // 3. 数据集元数据校验
-        DatasetInfo info = mbtilesService.getDatasetInfo(datasetName);
+        DatasetInfo info = mbtilesService.getDatasetInfo(resolvedName);
         if (info == null) {
             return ResponseEntity.notFound().build();
         }
@@ -176,10 +187,9 @@ public class TileController {
         }
 
         // 5. 查询瓦片（命中内存缓存或 SQLite，查无数据自动返回 TileEntry.EMPTY 单例）
-        TileEntry tile = mbtilesService.getTile(datasetName, z, x, y);
+        TileEntry tile = mbtilesService.getTile(resolvedName, z, x, y);
 
         if (tile == null || tile.isEmpty()) {
-            // 瓦片数据不存在返回 204 No Content，前端不报红报错
             return ResponseEntity.noContent()
                     .header(HttpHeaders.CACHE_CONTROL, getCacheControlHeader())
                     .build();
@@ -201,12 +211,71 @@ public class TileController {
         headers.set(HttpHeaders.ETAG, etag);
         headers.set(HttpHeaders.VARY, "Accept-Encoding");
 
-        // 若瓦片数据在 MBTiles 中已预压缩，直接声明 Content-Encoding，防止内嵌容器二次压缩
         if (tile.gzipped()) {
             headers.set(HttpHeaders.CONTENT_ENCODING, "gzip");
         }
 
         return new ResponseEntity<>(tile.data(), headers, HttpStatus.OK);
+    }
+
+    /**
+     * 辅助方法：从瓦片请求 URI 中智能提取包含子目录的数据集全名
+     */
+    private String resolveDatasetNameForTile(HttpServletRequest request, String pathVar, int z, int x, int y) {
+        if (pathVar != null && !pathVar.isBlank() && !pathVar.contains("/")) {
+            return mbtilesService.normalizeDatasetName(pathVar);
+        }
+
+        String uri = request.getRequestURI();
+        String contextPath = request.getContextPath();
+        if (contextPath != null && !contextPath.isBlank() && uri.startsWith(contextPath)) {
+            uri = uri.substring(contextPath.length());
+        }
+
+        // 去掉前缀 /tiles/
+        if (uri.startsWith("/tiles/")) {
+            uri = uri.substring(7);
+        }
+
+        // 剥离尾部的 /{z}/{x}/{y}(.pbf/.mvt)
+        int lastSlash = uri.lastIndexOf('/');
+        if (lastSlash > 0) {
+            int secondLast = uri.lastIndexOf('/', lastSlash - 1);
+            if (secondLast > 0) {
+                int thirdLast = uri.lastIndexOf('/', secondLast - 1);
+                if (thirdLast > 0) {
+                    return mbtilesService.normalizeDatasetName(uri.substring(0, thirdLast));
+                }
+            }
+        }
+
+        return mbtilesService.normalizeDatasetName(pathVar);
+    }
+
+    /**
+     * 辅助方法：从元数据请求 URI 中提取数据集名称
+     */
+    private String resolveDatasetNameFromRequest(HttpServletRequest request, String pathVar, String suffix) {
+        if (pathVar != null && !pathVar.isBlank() && !pathVar.contains("/")) {
+            return mbtilesService.normalizeDatasetName(pathVar);
+        }
+
+        String uri = request.getRequestURI();
+        String contextPath = request.getContextPath();
+        if (contextPath != null && !contextPath.isBlank() && uri.startsWith(contextPath)) {
+            uri = uri.substring(contextPath.length());
+        }
+
+        if (uri.startsWith("/tiles/")) {
+            uri = uri.substring(7);
+        }
+
+        int suffixIdx = uri.indexOf(suffix);
+        if (suffixIdx > 0) {
+            return mbtilesService.normalizeDatasetName(uri.substring(0, suffixIdx));
+        }
+
+        return mbtilesService.normalizeDatasetName(pathVar);
     }
 
     /**
@@ -255,9 +324,6 @@ public class TileController {
         return false;
     }
 
-    /**
-     * 剥离弱 ETag 标识前缀（W/）及首尾双引号
-     */
     private String stripQuotesAndWeak(String tag) {
         if (tag == null) {
             return "";

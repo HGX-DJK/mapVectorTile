@@ -13,11 +13,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * 瓦片引擎核心功能单元测试
- * 覆盖坐标换算、路径安全校验、CRC32 ETag 计算、元数据解析、空间范围剪枝、空瓦片单例及 RFC 7232 条件请求比对
+ * 覆盖坐标换算、路径安全校验、子目录支持、CRC32 ETag 计算、元数据解析、空间范围剪枝、空瓦片单例及 RFC 7232 条件请求比对
  */
 class TileServiceTest {
 
-    private static final Pattern SAFE_DATASET_NAME = Pattern.compile("^[a-zA-Z0-9_-]+$");
+    private static final Pattern SAFE_DATASET_NAME = Pattern.compile("^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$");
 
     @Test
     @DisplayName("TMS 与 XYZ 坐标相互转换数学正确性")
@@ -34,17 +34,25 @@ class TileServiceTest {
     }
 
     @Test
-    @DisplayName("数据集安全名称正则校验，防御路径穿越")
+    @DisplayName("数据集安全名称正则校验，支持子目录层级并严格防御路径穿越")
     void testDatasetNameValidation() {
+        // 单层数据集名称
         assertTrue(SAFE_DATASET_NAME.matcher("basemap_line_point").matches());
         assertTrue(SAFE_DATASET_NAME.matcher("dataset-v1_2").matches());
         assertTrue(SAFE_DATASET_NAME.matcher("map123").matches());
 
-        // 恶意注入输入必须被成功拦截
+        // 多层子目录结构名称
+        assertTrue(SAFE_DATASET_NAME.matcher("vector/roads").matches());
+        assertTrue(SAFE_DATASET_NAME.matcher("admin/beijing/district").matches());
+
+        // 恶意注入与非法路径必须被成功拦截
         assertFalse(SAFE_DATASET_NAME.matcher("../secret").matches());
+        assertFalse(SAFE_DATASET_NAME.matcher("vector/../../secret").matches());
         assertFalse(SAFE_DATASET_NAME.matcher("..\\windows\\system32").matches());
         assertFalse(SAFE_DATASET_NAME.matcher("/etc/passwd").matches());
-        assertFalse(SAFE_DATASET_NAME.matcher("data/basemap").matches());
+        assertFalse(SAFE_DATASET_NAME.matcher("data/").matches());
+        assertFalse(SAFE_DATASET_NAME.matcher("/vector/roads").matches());
+        assertFalse(SAFE_DATASET_NAME.matcher("vector//roads").matches());
         assertFalse(SAFE_DATASET_NAME.matcher("data;rm").matches());
         assertFalse(SAFE_DATASET_NAME.matcher("data' OR 1=1--").matches());
     }
