@@ -15,6 +15,8 @@
     <description>MBTiles 矢量瓦片高性能服务引擎</description>
     <properties>
         <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     </properties>
     <dependencies>
         <!-- Spring Boot Web 核心依赖（集成内嵌 Tomcat） -->

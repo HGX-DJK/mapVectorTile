@@ -11,9 +11,13 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.GZIPInputStream;
 
 /**
  * 矢量瓦片 REST 控制器
@@ -74,11 +78,12 @@ public class TileController {
 
     /**
      * 标准 TileJSON 3.0 规范端点
-     * 支持平铺名称与子目录路径（例如 /tiles/admin/beijing/tilejson.json）
+     * 兼容 Spring 6 PathPatternParser，支持 1~3 级子目录及双下划线别名
      */
     @GetMapping(value = {
             "/{datasetName}/tilejson.json",
-            "/**/tilejson.json"
+            "/{dir1}/{datasetName}/tilejson.json",
+            "/{dir1}/{dir2}/{datasetName}/tilejson.json"
     }, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getTileJson(
             @PathVariable(required = false) String datasetName,
@@ -125,7 +130,8 @@ public class TileController {
      */
     @GetMapping(value = {
             "/{datasetName}/metadata.json",
-            "/**/metadata.json"
+            "/{dir1}/{datasetName}/metadata.json",
+            "/{dir1}/{dir2}/{datasetName}/metadata.json"
     }, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getMetadata(
             @PathVariable(required = false) String datasetName,
@@ -136,15 +142,18 @@ public class TileController {
 
     /**
      * 获取指定坐标的矢量瓦片
-     * 原生支持 .pbf、.mvt 及无后缀路由，并自适应匹配子目录（如 /tiles/vector/roads/10/857/418.pbf）
+     * 完全兼容 Spring 6 PathPatternParser，支持 1~3 级子目录及 .pbf、.mvt 和无后缀路由
      */
     @GetMapping(value = {
             "/{datasetName}/{z}/{x}/{y}.pbf",
             "/{datasetName}/{z}/{x}/{y}.mvt",
             "/{datasetName}/{z}/{x}/{y}",
-            "/**/{z}/{x}/{y}.pbf",
-            "/**/{z}/{x}/{y}.mvt",
-            "/**/{z}/{x}/{y}"
+            "/{dir1}/{datasetName}/{z}/{x}/{y}.pbf",
+            "/{dir1}/{datasetName}/{z}/{x}/{y}.mvt",
+            "/{dir1}/{datasetName}/{z}/{x}/{y}",
+            "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}.pbf",
+            "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}.mvt",
+            "/{dir1}/{dir2}/{datasetName}/{z}/{x}/{y}"
     })
     public ResponseEntity<byte[]> getVectorTile(
             @PathVariable(required = false) String datasetName,
@@ -205,27 +214,80 @@ public class TileController {
                     .build();
         }
 
+        // 7. Gzip 内容协商（RFC 7231 / RFC 9110 规范）：
+        //    如果瓦片经 gzip 压缩，但客户端未声明 Accept-Encoding: gzip（如仅 identity 或显式 gzip;q=0），
+        //    服务端动态解压为未压缩原始 protobuf 流，确保兼容所有老旧地图渲染器与命令行工具。
+        byte[] responseData = tile.data();
+        boolean sendGzip = false;
+
+        if (tile.gzipped()) {
+            if (clientAcceptsGzip(request)) {
+                sendGzip = true;
+            } else {
+                try {
+                    responseData = decompressGzip(tile.data());
+                } catch (IOException e) {
+                    responseData = tile.data();
+                    sendGzip = true;
+                }
+            }
+        }
+
         HttpHeaders headers = new HttpHeaders();
         headers.set(HttpHeaders.CONTENT_TYPE, "application/x-protobuf");
         headers.set(HttpHeaders.CACHE_CONTROL, getCacheControlHeader());
-        headers.set(HttpHeaders.ETAG, etag);
+        // 解压后若以未压缩格式传输，以 W/ 弱 ETag 标示；压缩原样传输则使用强 ETag
+        headers.set(HttpHeaders.ETAG, sendGzip ? etag : "W/" + etag);
         headers.set(HttpHeaders.VARY, "Accept-Encoding");
 
-        if (tile.gzipped()) {
+        if (sendGzip) {
             headers.set(HttpHeaders.CONTENT_ENCODING, "gzip");
         }
 
-        return new ResponseEntity<>(tile.data(), headers, HttpStatus.OK);
+        return new ResponseEntity<>(responseData, headers, HttpStatus.OK);
+    }
+
+    /**
+     * 判断客户端是否支持 gzip 压缩传输（遵循 RFC 7231 / RFC 9110 标准）
+     * 检查 Accept-Encoding 请求头，若未提供或显式禁止 (gzip;q=0) 则返回 false
+     */
+    private boolean clientAcceptsGzip(HttpServletRequest request) {
+        String acceptEncoding = request.getHeader(HttpHeaders.ACCEPT_ENCODING);
+        if (acceptEncoding == null || acceptEncoding.isBlank()) {
+            return false;
+        }
+        for (String encoding : acceptEncoding.split(",")) {
+            String token = encoding.trim().toLowerCase();
+            if (token.startsWith("gzip") || token.startsWith("*")) {
+                if (token.contains(";q=0") || token.contains(";q=0.0") || token.contains(";q=0.00")) {
+                    return false;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 对 Gzip 瓦片二进制流进行动态解压缩（客户端不支持 gzip 时的降级方案）
+     */
+    private byte[] decompressGzip(byte[] compressedData) throws IOException {
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(compressedData);
+             GZIPInputStream gis = new GZIPInputStream(bais);
+             ByteArrayOutputStream baos = new ByteArrayOutputStream(compressedData.length * 2)) {
+            byte[] buffer = new byte[4096];
+            int len;
+            while ((len = gis.read(buffer)) > 0) {
+                baos.write(buffer, 0, len);
+            }
+            return baos.toByteArray();
+        }
     }
 
     /**
      * 辅助方法：从瓦片请求 URI 中智能提取包含子目录的数据集全名
      */
     private String resolveDatasetNameForTile(HttpServletRequest request, String pathVar, int z, int x, int y) {
-        if (pathVar != null && !pathVar.isBlank() && !pathVar.contains("/")) {
-            return mbtilesService.normalizeDatasetName(pathVar);
-        }
-
         String uri = request.getRequestURI();
         String contextPath = request.getContextPath();
         if (contextPath != null && !contextPath.isBlank() && uri.startsWith(contextPath)) {
@@ -237,7 +299,7 @@ public class TileController {
             uri = uri.substring(7);
         }
 
-        // 剥离尾部的 /{z}/{x}/{y}(.pbf/.mvt)
+        // 剥离尾部的 /{z}/{x}/{y}(.pbf/.mvt) 3 层坐标段
         int lastSlash = uri.lastIndexOf('/');
         if (lastSlash > 0) {
             int secondLast = uri.lastIndexOf('/', lastSlash - 1);
@@ -256,10 +318,6 @@ public class TileController {
      * 辅助方法：从元数据请求 URI 中提取数据集名称
      */
     private String resolveDatasetNameFromRequest(HttpServletRequest request, String pathVar, String suffix) {
-        if (pathVar != null && !pathVar.isBlank() && !pathVar.contains("/")) {
-            return mbtilesService.normalizeDatasetName(pathVar);
-        }
-
         String uri = request.getRequestURI();
         String contextPath = request.getContextPath();
         if (contextPath != null && !contextPath.isBlank() && uri.startsWith(contextPath)) {

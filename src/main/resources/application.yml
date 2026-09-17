@@ -46,8 +46,8 @@ spring:
   cache:
     type: caffeine
     caffeine:
-      # 瓦片内存缓存容量：最大 50,000 条，30 分钟无访问自动过期，记录命中率统计
-      spec: maximumSize=50000,expireAfterAccess=30m,recordStats
+      # 瓦片内存缓存容量：初始分配 2,000 条防扩容拷贝，最大 50,000 条，30 分钟无访问自动过期，开启命中率统计
+      spec: initialCapacity=2000,maximumSize=50000,expireAfterAccess=30m,recordStats
 
 logging:
   level:

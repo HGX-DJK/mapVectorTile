@@ -132,6 +132,75 @@ class TileServiceTest {
         assertFalse(matchesETag(serverEtag, null), "null 头部不应匹配");
     }
 
+    @Test
+    @DisplayName("数据集扩展名自动剥离与双下划线子目录映射校验")
+    void testDatasetNameExtensionStripping() {
+        assertEquals("beijing", normalizeDatasetName("beijing.db"));
+        assertEquals("beijing", normalizeDatasetName("beijing.mbtiles"));
+        assertEquals("beijing", normalizeDatasetName("beijing.sqlite"));
+        assertEquals("beijing", normalizeDatasetName("beijing.sqlite3"));
+        assertEquals("admin/beijing", normalizeDatasetName("admin__beijing.db"));
+        assertEquals("admin/beijing", normalizeDatasetName("admin/beijing.mbtiles"));
+        assertEquals("basemap/vector/roads", normalizeDatasetName("basemap__vector__roads.sqlite3"));
+
+        // 验证剥离后均能顺利通过安全正则检查
+        assertTrue(SAFE_DATASET_NAME.matcher(normalizeDatasetName("beijing.db")).matches());
+        assertTrue(SAFE_DATASET_NAME.matcher(normalizeDatasetName("admin__beijing.db")).matches());
+        assertTrue(SAFE_DATASET_NAME.matcher(normalizeDatasetName("vector/roads.mbtiles")).matches());
+
+        // 验证路径穿越即使携带扩展名依然被拦截
+        assertFalse(SAFE_DATASET_NAME.matcher(normalizeDatasetName("../secret.db")).matches());
+        assertFalse(SAFE_DATASET_NAME.matcher(normalizeDatasetName("a/../../secret.mbtiles")).matches());
+    }
+
+    @Test
+    @DisplayName("Gzip 压缩与动态解压数据一致性校验 (RFC 7231)")
+    void testGzipDecompression() throws Exception {
+        byte[] original = "Vector tile protobuf test data payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        // 模拟 Gzip 压缩
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gos = new java.util.zip.GZIPOutputStream(baos)) {
+            gos.write(original);
+        }
+        byte[] compressed = baos.toByteArray();
+
+        // 验证 Gzip 魔数 0x1F, 0x8B
+        assertTrue(compressed.length >= 2 && compressed[0] == (byte) 0x1F && compressed[1] == (byte) 0x8B);
+
+        // 解压缩验证
+        java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(compressed);
+        try (java.util.zip.GZIPInputStream gis = new java.util.zip.GZIPInputStream(bais);
+             java.io.ByteArrayOutputStream decompressedBaos = new java.io.ByteArrayOutputStream()) {
+            byte[] buf = new byte[1024];
+            int n;
+            while ((n = gis.read(buf)) > 0) {
+                decompressedBaos.write(buf, 0, n);
+            }
+            byte[] decompressed = decompressedBaos.toByteArray();
+            assertArrayEquals(original, decompressed, "解压后的字节数据应与原始字节严格一致");
+        }
+    }
+
+    private static final java.util.List<String> SUPPORTED_EXTENSIONS = java.util.List.of(
+            ".mbtiles",
+            ".db",
+            ".sqlite",
+            ".sqlite3"
+    );
+
+    private String normalizeDatasetName(String datasetName) {
+        if (datasetName == null) return null;
+        String normalized = datasetName.replace("__", "/").trim();
+        for (String ext : SUPPORTED_EXTENSIONS) {
+            if (normalized.toLowerCase().endsWith(ext)) {
+                normalized = normalized.substring(0, normalized.length() - ext.length());
+                break;
+            }
+        }
+        return normalized;
+    }
+
     /**
      * 辅助方法：校验 ETag 是否与客户端发送的 If-None-Match 请求头匹配
      */

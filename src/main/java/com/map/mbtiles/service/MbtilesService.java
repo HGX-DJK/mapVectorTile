@@ -71,13 +71,22 @@ public class MbtilesService {
     }
 
     /**
-     * 将请求的数据集名称标准化（支持将双下划线 __ 映射为子目录斜杠 /）
+     * 将请求的数据集名称标准化
+     * 1. 支持将双下划线 __ 映射为子目录斜杠 /
+     * 2. 自动剥离已知扩展名（.mbtiles、.db、.sqlite、.sqlite3），使携带后缀的请求能够安全通过白名单校验
      */
     public String normalizeDatasetName(String datasetName) {
         if (datasetName == null) {
             return null;
         }
-        return datasetName.replace("__", "/").trim();
+        String normalized = datasetName.replace("__", "/").trim();
+        for (String ext : SUPPORTED_EXTENSIONS) {
+            if (normalized.toLowerCase().endsWith(ext)) {
+                normalized = normalized.substring(0, normalized.length() - ext.length());
+                break;
+            }
+        }
+        return normalized;
     }
 
     /**
@@ -98,18 +107,17 @@ public class MbtilesService {
             return null;
         }
 
-        String normalizedName = normalizeDatasetName(datasetName);
-
         try {
             File dataDir = new File(properties.getDataDir()).getCanonicalFile();
             if (!dataDir.exists() || !dataDir.isDirectory()) {
                 return null;
             }
 
-            // 1. 如果请求本身已携带合法扩展名，直接查找
+            // 1. 如果原始请求中已包含支持的扩展名，优先直接精准匹配物理文件
+            String rawPath = datasetName.replace("__", "/").trim();
             for (String ext : SUPPORTED_EXTENSIONS) {
-                if (normalizedName.toLowerCase().endsWith(ext)) {
-                    File directFile = new File(dataDir, normalizedName).getCanonicalFile();
+                if (rawPath.toLowerCase().endsWith(ext)) {
+                    File directFile = new File(dataDir, rawPath).getCanonicalFile();
                     if (isSafeFileUnderDir(directFile, dataDir)) {
                         return directFile;
                     }
@@ -117,6 +125,7 @@ public class MbtilesService {
             }
 
             // 2. 依次尝试拼接各支持的扩展名（.mbtiles -> .db -> .sqlite -> .sqlite3）
+            String normalizedName = normalizeDatasetName(datasetName);
             for (String ext : SUPPORTED_EXTENSIONS) {
                 File candidate = new File(dataDir, normalizedName + ext).getCanonicalFile();
                 if (isSafeFileUnderDir(candidate, dataDir)) {
@@ -352,7 +361,8 @@ public class MbtilesService {
 
             try (ResultSet rs = pstmt.executeQuery()) {
                 if (rs.next()) {
-                    byte[] data = rs.getBytes("tile_data");
+                    // 使用直接列索引 1 替代列名字符串检索，消除高并发下的元数据查找哈希开销
+                    byte[] data = rs.getBytes(1);
                     if (data == null || data.length == 0) {
                         return TileEntry.EMPTY;
                     }
@@ -452,7 +462,8 @@ public class MbtilesService {
              ResultSet rs = pstmt.executeQuery()) {
 
             while (rs.next()) {
-                metadata.put(rs.getString("name"), rs.getString("value"));
+                // 使用直接列索引 1、2 替代字符串列名检索
+                metadata.put(rs.getString(1), rs.getString(2));
             }
         } catch (SQLException e) {
             log.warn("读取数据集 {} 元数据异常: {}", datasetName, e.getMessage());
