@@ -42,6 +42,8 @@ public class DatasetInfo {
     private Integer maxzoom;
     /** 空间边界范围 [西经, 南纬, 东经, 北纬] */
     private double[] bounds;
+    /** 各缩放层级（0~22）预计算的瓦片边界盒数组（为 null 表示全球全量覆盖），实现 O(1) 拓扑短路剪枝 */
+    private TileRange[] tileRanges;
     /** 地图默认中心点坐标 [经度, 纬度, 缩放层级] */
     private double[] center;
     /** 矢量图层定义列表（包含图层 id 及字段属性） */
@@ -52,6 +54,15 @@ public class DatasetInfo {
     private long lastModified;
     /** SQLite 中原始的 metadata 键值对集合 */
     private Map<String, String> rawMetadata;
+
+    /**
+     * 瓦片行列号边界范围紧凑结构体（启动/加载时预计算完成，杜绝运行时的浮点与三角函数开销）
+     */
+    public record TileRange(int minX, int maxX, int minY, int maxY) {
+        public boolean contains(int x, int y) {
+            return x >= minX && x <= maxX && y >= minY && y <= maxY;
+        }
+    }
 
     /**
      * 快速校验请求的缩放层级（z）是否处于该数据集的有效范围内
@@ -70,9 +81,9 @@ public class DatasetInfo {
     }
 
     /**
-     * 地理空间范围（BBox）拓扑短路校验：
-     * 根据墨卡托投影算法，计算当前缩放级别下该数据集对应的瓦片行列号边界。
-     * 若请求的 (x, y) 完全在数据集地理范围之外，则判定为无效，无需执行数据库查询。
+     * 地理空间范围（BBox）拓扑短路校验（O(1) 预计算查表）：
+     * 直接读取启动/加载时预计算完成的瓦片边界盒，
+     * 若请求的 (x, y) 在该层级瓦片外包范围之外，直接短路阻断，零数据库与缓存开销。
      *
      * @param z 缩放层级
      * @param x 瓦片列号
@@ -80,8 +91,22 @@ public class DatasetInfo {
      * @return 瓦片是否在数据集地理范围（附带 1 个瓦片缓冲）内
      */
     public boolean isTileWithinBounds(int z, int x, int y) {
-        if (bounds == null || bounds.length < 4) {
+        if (tileRanges == null) {
             return true;
+        }
+        if (z < 0 || z >= tileRanges.length) {
+            return false;
+        }
+        TileRange range = tileRanges[z];
+        return range == null || range.contains(x, y);
+    }
+
+    /**
+     * 预计算 0~22 各层级的瓦片边界范围盒（墨卡托投影三角函数与对数只计算一次）
+     */
+    public static TileRange[] computeTileRanges(double[] bounds) {
+        if (bounds == null || bounds.length < 4) {
+            return null;
         }
 
         // bounds 顺序：[西经(minLng), 南纬(minLat), 东经(maxLng), 北纬(maxLat)]
@@ -90,32 +115,37 @@ public class DatasetInfo {
         double maxLng = bounds[2];
         double maxLat = bounds[3];
 
-        // 若覆盖全球范围或默认值，则无需剪枝
+        // 若覆盖全球范围或默认值，返回 null 表示无需剪枝
         if (minLng <= -180.0 && maxLng >= 180.0 && minLat <= -85.0 && maxLat >= 85.0) {
-            return true;
+            return null;
         }
 
-        int maxTiles = 1 << z;
-
-        // 经度对应 X 列号换算（附带 1 个瓦片的容错缓冲边界）
-        int minTileX = Math.max(0, (int) Math.floor((minLng + 180.0) / 360.0 * maxTiles) - 1);
-        int maxTileX = Math.min(maxTiles - 1, (int) Math.floor((maxLng + 180.0) / 360.0 * maxTiles) + 1);
-
-        if (x < minTileX || x > maxTileX) {
-            return false;
-        }
-
-        // 纬度对应 Y 行号换算（Web 墨卡托投影：北纬对应较小的 Y，南纬对应较大的 Y）
         double clampedMaxLat = Math.min(85.05112878, Math.max(-85.05112878, maxLat));
         double clampedMinLat = Math.min(85.05112878, Math.max(-85.05112878, minLat));
 
         double maxLatRad = Math.toRadians(clampedMaxLat);
         double minLatRad = Math.toRadians(clampedMinLat);
 
-        int minTileY = Math.max(0, (int) Math.floor((1.0 - Math.log(Math.tan(maxLatRad) + 1.0 / Math.cos(maxLatRad)) / Math.PI) / 2.0 * maxTiles) - 1);
-        int maxTileY = Math.min(maxTiles - 1, (int) Math.floor((1.0 - Math.log(Math.tan(minLatRad) + 1.0 / Math.cos(minLatRad)) / Math.PI) / 2.0 * maxTiles) + 1);
+        // 墨卡托投影 Y 轴归一化比例因子（0.0 ~ 1.0），超越函数全局仅计算一次
+        double yFactor1 = (1.0 - Math.log(Math.tan(maxLatRad) + 1.0 / Math.cos(maxLatRad)) / Math.PI) / 2.0;
+        double yFactor2 = (1.0 - Math.log(Math.tan(minLatRad) + 1.0 / Math.cos(minLatRad)) / Math.PI) / 2.0;
 
-        return y >= minTileY && y <= maxTileY;
+        double xFactor1 = (minLng + 180.0) / 360.0;
+        double xFactor2 = (maxLng + 180.0) / 360.0;
+
+        TileRange[] ranges = new TileRange[23]; // 覆盖 z = 0..22
+        for (int z = 0; z <= 22; z++) {
+            int maxTiles = 1 << z;
+
+            int minTileX = Math.max(0, (int) Math.floor(xFactor1 * maxTiles) - 1);
+            int maxTileX = Math.min(maxTiles - 1, (int) Math.floor(xFactor2 * maxTiles) + 1);
+
+            int minTileY = Math.max(0, (int) Math.floor(yFactor1 * maxTiles) - 1);
+            int maxTileY = Math.min(maxTiles - 1, (int) Math.floor(yFactor2 * maxTiles) + 1);
+
+            ranges[z] = new TileRange(minTileX, maxTileX, minTileY, maxTileY);
+        }
+        return ranges;
     }
 
     /**
@@ -135,6 +165,7 @@ public class DatasetInfo {
         Integer maxzoom = parseInteger(meta.get("maxzoom"));
         double[] bounds = parseDoubleArray(meta.get("bounds"));
         double[] center = parseDoubleArray(meta.get("center"));
+        TileRange[] tileRanges = computeTileRanges(bounds);
 
         List<Map<String, Object>> vectorLayers = Collections.emptyList();
         String jsonField = meta.get("json");
@@ -167,6 +198,7 @@ public class DatasetInfo {
                 .minzoom(minzoom != null ? minzoom : 0)
                 .maxzoom(maxzoom != null ? maxzoom : 22)
                 .bounds(bounds != null ? bounds : new double[]{-180.0, -85.05112878, 180.0, 85.05112878})
+                .tileRanges(tileRanges)
                 .center(center != null ? center : new double[]{0.0, 0.0, 2.0})
                 .vectorLayers(vectorLayers)
                 .fileSize(fileSize)

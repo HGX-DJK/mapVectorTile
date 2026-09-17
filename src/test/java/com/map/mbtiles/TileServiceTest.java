@@ -120,6 +120,34 @@ class TileServiceTest {
     }
 
     @Test
+    @DisplayName("TileRange 紧凑边界预计算与 O(1) 区间匹配正确性")
+    void testTileRangePrecomputation() {
+        DatasetInfo.TileRange range = new DatasetInfo.TileRange(10, 20, 30, 40);
+        assertTrue(range.contains(10, 30));
+        assertTrue(range.contains(15, 35));
+        assertTrue(range.contains(20, 40));
+        assertFalse(range.contains(9, 35));
+        assertFalse(range.contains(21, 35));
+        assertFalse(range.contains(15, 29));
+        assertFalse(range.contains(15, 41));
+
+        // 全球范围 null 检查
+        double[] globalBounds = new double[]{-180.0, -85.05112878, 180.0, 85.05112878};
+        assertNull(DatasetInfo.computeTileRanges(globalBounds), "全球覆盖边界无需剪枝，应返回 null");
+
+        // 局部区域预计算
+        double[] bjBounds = new double[]{115.4, 39.4, 117.5, 41.1};
+        DatasetInfo.TileRange[] ranges = DatasetInfo.computeTileRanges(bjBounds);
+        assertNotNull(ranges);
+        assertEquals(23, ranges.length);
+
+        // z=10 时北京瓦片验证
+        DatasetInfo.TileRange r10 = ranges[10];
+        assertTrue(r10.contains(843, 388), "z=10 时北京中心瓦片应在预计算范围内");
+        assertFalse(r10.contains(301, 384), "z=10 时纽约瓦片不在北京预计算范围内");
+    }
+
+    @Test
     @DisplayName("RFC 7232 ETag 条件比对支持弱 ETag 与多 ETag")
     void testEtagMatching() {
         String serverEtag = "\"1a2b3c4d\"";

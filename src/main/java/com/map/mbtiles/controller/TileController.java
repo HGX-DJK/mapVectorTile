@@ -57,12 +57,59 @@ public class TileController {
     }
 
     /**
-     * 数据集热重载端点 — 动态重新载入磁盘上的 MBTiles / DB 文件并重置连接池与缓存
+     * 数据集热重载端点：
+     * 1. 支持指定单个数据集细粒度重载：POST /tiles/reload?dataset=beijing
+     *    仅释放该数据集的连接池并按前缀精准驱逐其瓦片缓存，保留其他数据集的高命中率缓存（防雪崩）
+     * 2. 支持全量重载：POST /tiles/reload
      */
     @PostMapping(value = "/reload", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<Map<String, String>> reloadDatasets() {
+    public ResponseEntity<Map<String, String>> reloadDatasets(
+            @RequestParam(value = "dataset", required = false) String dataset) {
+
+        if (dataset != null && !dataset.isBlank()) {
+            if (!mbtilesService.isValidDatasetName(dataset)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "status", "error",
+                        "message", "指定重载的数据集名称非法: " + dataset
+                ));
+            }
+            boolean success = mbtilesService.reloadDataset(dataset);
+            if (success) {
+                return ResponseEntity.ok(Map.of(
+                        "status", "success",
+                        "dataset", mbtilesService.normalizeDatasetName(dataset),
+                        "message", "数据集 '" + dataset + "' 已独立热重载完成（其余数据集缓存完整保留）"
+                ));
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
+                        "status", "error",
+                        "message", "数据集 '" + dataset + "' 热重载失败"
+                ));
+            }
+        }
+
         mbtilesService.reloadDatasets();
-        return ResponseEntity.ok(Map.of("status", "success", "message", "MBTiles / DB 数据集与缓存已全部热重载"));
+        return ResponseEntity.ok(Map.of(
+                "status", "success",
+                "message", "所有 MBTiles / DB 数据集与缓存已全部全局热重载"
+        ));
+    }
+
+    /**
+     * 单数据集路径式独立热重载端点：POST /tiles/{datasetName}/reload
+     * 兼容 1~3 级子目录（如 /tiles/vector/roads/reload）与双下划线别名
+     */
+    @PostMapping(value = {
+            "/{datasetName}/reload",
+            "/{dir1}/{datasetName}/reload",
+            "/{dir1}/{dir2}/{datasetName}/reload"
+    }, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, String>> reloadSingleDataset(
+            @PathVariable(required = false) String datasetName,
+            HttpServletRequest request) {
+
+        String resolvedName = resolveDatasetNameFromRequest(request, datasetName, "/reload");
+        return reloadDatasets(resolvedName);
     }
 
     /**

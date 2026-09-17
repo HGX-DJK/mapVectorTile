@@ -493,10 +493,66 @@ public class MbtilesService {
     }
 
     /**
+     * 细粒度独立热重载单个数据集：
+     * 1. 安全关闭并移除该数据集的 HikariDataSource 连接池
+     * 2. 移除其元数据缓存（datasetInfoCache 与 Spring metadata Cache）
+     * 3. 精准驱逐 Caffeine 中属于该数据集前缀的所有已缓存瓦片，保留其他数据集的高命中率缓存（防雪崩）
+     * 4. 若开启预热，异步触发该单数据集低层级切片的重新预热
+     *
+     * @param datasetName 待重载的数据集名称（支持携带扩展名或子目录路径）
+     * @return 是否重载成功
+     */
+    public synchronized boolean reloadDataset(String datasetName) {
+        if (!isValidDatasetName(datasetName)) {
+            log.warn("热重载请求的数据集名称非法: {}", datasetName);
+            return false;
+        }
+
+        String normalizedName = normalizeDatasetName(datasetName);
+        log.info("正在执行单数据集独立热重载: {} (规范化名: {})", datasetName, normalizedName);
+
+        // 1. 关闭并清理该数据集的独立 HikariCP 连接池
+        HikariDataSource ds = dataSources.remove(normalizedName);
+        if (ds != null) {
+            ds.close();
+            log.info("已释放数据集 '{}' 的连接池资源", normalizedName);
+        }
+
+        // 2. 清理元数据与访问时间戳
+        lastAccessTimes.remove(normalizedName);
+        datasetInfoCache.remove(normalizedName);
+
+        // 3. 清理 Spring Cache 中的 metadata 缓存
+        Cache metaCache = cacheManager.getCache("metadata");
+        if (metaCache != null) {
+            metaCache.evict(normalizedName);
+        }
+
+        // 4. 精准驱逐 Caffeine 瓦片缓存中以当前数据集为前缀的瓦片（如 "beijing:*"）
+        Cache tileCache = cacheManager.getCache("tiles");
+        if (tileCache != null && tileCache.getNativeCache() instanceof com.github.benmanes.caffeine.cache.Cache<?, ?> nativeCache) {
+            String prefix = normalizedName + ":";
+            long beforeCount = nativeCache.estimatedSize();
+            nativeCache.asMap().keySet().removeIf(k -> k instanceof String keyStr && keyStr.startsWith(prefix));
+            long evicted = beforeCount - nativeCache.estimatedSize();
+            log.info("已精准驱逐数据集 '{}' 的内存瓦片缓存（清除约 {} 条缓存项），其余数据集缓存完整保留", normalizedName, evicted);
+        }
+
+        // 5. 若全局启用了瓦片预热，异步触发该重载数据集的低层级批量预热
+        if (properties.getWarmup().isEnabled()) {
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                warmupDatasetBatch(normalizedName, properties.getWarmup().getMaxZoom());
+            });
+        }
+
+        return true;
+    }
+
+    /**
      * 热重载所有数据集：释放全部连接池、清空内存缓存，并在后续请求时按需重新加载
      */
     public synchronized void reloadDatasets() {
-        log.info("正在执行 MBTiles 数据集热重载...");
+        log.info("正在执行 MBTiles 数据集全局热重载...");
         cleanup();
         Cache tileCache = cacheManager.getCache("tiles");
         if (tileCache != null) {
