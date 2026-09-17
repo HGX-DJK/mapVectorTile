@@ -1,9 +1,12 @@
 package com.map.mbtiles.service;
 
 import com.map.mbtiles.config.MbtilesProperties;
+import com.map.mbtiles.model.DatasetInfo;
+import com.map.mbtiles.model.TileEntry;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.Cacheable;
@@ -30,11 +33,12 @@ import java.util.zip.CRC32;
 
 /**
  * MBTiles 核心服务类
- * 负责 SQLite 连接池生命周期管理、PRAGMA 性能调优、批量预热拉取以及带缓存的瓦片读取
+ * 负责 SQLite 连接池生命周期管理、PRAGMA 性能调优、批量预热拉取、空瓦片负向缓存以及带缓存的瓦片读取
  */
-@Slf4j
 @Service
 public class MbtilesService {
+
+    private static final Logger log = LoggerFactory.getLogger(MbtilesService.class);
 
     /** 数据集安全名称白名单正则：仅允许字母、数字、下划线及短横线 */
     private static final Pattern SAFE_DATASET_NAME = Pattern.compile("^[a-zA-Z0-9_-]+$");
@@ -217,19 +221,14 @@ public class MbtilesService {
 
     /**
      * 获取指定坐标的矢量瓦片包装对象
-     * 优先走 Caffeine 缓存；若未命中则查询 SQLite，并自动做 Zoom 边界前置短路判断
+     * 优先走 Caffeine 缓存；若未命中则查询 SQLite。
+     * 若 SQLite 中不存在该坐标数据，则返回并缓存 TileEntry.EMPTY 单例，杜绝大范围空白区域的穿透查询。
      */
-    @Cacheable(value = "tiles", key = "#datasetName + ':' + #z + ':' + #x + ':' + #y", unless = "#result == null")
+    @Cacheable(value = "tiles", key = "#datasetName + ':' + #z + ':' + #x + ':' + #y")
     public TileEntry getTile(String datasetName, int z, int x, int y) {
-        // 缩放层级前置短路过滤：若超出该数据集的缩放范围，不触发任何数据库 I/O 直接返回 null
-        DatasetInfo info = getDatasetInfo(datasetName);
-        if (info != null && !info.isZoomValid(z)) {
-            return null;
-        }
-
         DataSource dataSource = getDataSource(datasetName);
         if (dataSource == null) {
-            return null;
+            return TileEntry.EMPTY;
         }
 
         // MBTiles 标准采用 TMS 坐标系（原点在左下角），而 Web 请求为 XYZ 坐标系（原点在左上角），需进行 Y 轴转换
@@ -248,7 +247,7 @@ public class MbtilesService {
                 if (rs.next()) {
                     byte[] data = rs.getBytes("tile_data");
                     if (data == null || data.length == 0) {
-                        return null;
+                        return TileEntry.EMPTY;
                     }
 
                     // 采用硬件 SIMD 指令加速的 CRC32 计算 ETag
@@ -268,7 +267,8 @@ public class MbtilesService {
             log.error("查询瓦片出错 {}/{}/{}/{}: {}", datasetName, z, x, y, e.getMessage());
         }
 
-        return null;
+        // 数据库查无此瓦片，返回空瓦片单例写入缓存，防止后续重复穿透 SQLite
+        return TileEntry.EMPTY;
     }
 
     /**
@@ -355,6 +355,44 @@ public class MbtilesService {
             log.warn("读取数据集 {} 元数据异常: {}", datasetName, e.getMessage());
         }
         return metadata;
+    }
+
+    /**
+     * 获取 Caffeine 瓦片缓存的运行指标统计数据
+     */
+    public Map<String, Object> getCacheStats() {
+        Cache cache = cacheManager.getCache("tiles");
+        if (cache != null && cache.getNativeCache() instanceof com.github.benmanes.caffeine.cache.Cache<?, ?> nativeCache) {
+            com.github.benmanes.caffeine.cache.stats.CacheStats stats = nativeCache.stats();
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("estimatedSize", nativeCache.estimatedSize());
+            map.put("hitCount", stats.hitCount());
+            map.put("missCount", stats.missCount());
+            double hitRate = stats.requestCount() > 0 ? stats.hitRate() * 100.0 : 0.0;
+            map.put("hitRate", String.format("%.2f%%", hitRate));
+            map.put("evictionCount", stats.evictionCount());
+            map.put("loadSuccessCount", stats.loadSuccessCount());
+            map.put("activeDataSources", getDataSourceCount());
+            return map;
+        }
+        return Map.of("status", "缓存统计指标未开启或不可用");
+    }
+
+    /**
+     * 热重载所有数据集：释放全部连接池、清空内存缓存，并在后续请求时按需重新加载
+     */
+    public synchronized void reloadDatasets() {
+        log.info("正在执行 MBTiles 数据集热重载...");
+        cleanup();
+        Cache tileCache = cacheManager.getCache("tiles");
+        if (tileCache != null) {
+            tileCache.clear();
+        }
+        Cache metaCache = cacheManager.getCache("metadata");
+        if (metaCache != null) {
+            metaCache.clear();
+        }
+        log.info("所有 MBTiles 连接池与内存缓存已重置完毕。");
     }
 
     /**

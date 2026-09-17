@@ -1,9 +1,9 @@
 package com.map.mbtiles.controller;
 
 import com.map.mbtiles.config.MbtilesProperties;
-import com.map.mbtiles.service.DatasetInfo;
+import com.map.mbtiles.model.DatasetInfo;
+import com.map.mbtiles.model.TileEntry;
 import com.map.mbtiles.service.MbtilesService;
-import com.map.mbtiles.service.TileEntry;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -17,15 +17,11 @@ import java.util.Map;
 
 /**
  * 矢量瓦片 REST 控制器
- * 提供瓦片二进制流响应、TileJSON 3.0 标准规范端点、数据集目录及健康检查
+ * 提供瓦片二进制流响应（支持 .pbf / .mvt 双后缀）、TileJSON 3.0 标准规范端点、
+ * 数据集目录、空间范围（BBox）拓扑剪枝、缓存指标监控与数据集热重载
  */
 @RestController
 @RequestMapping("/tiles")
-@CrossOrigin(
-        origins = "*",
-        maxAge = 86400,
-        exposedHeaders = {HttpHeaders.ETAG, HttpHeaders.CONTENT_LENGTH, HttpHeaders.CONTENT_ENCODING}
-)
 public class TileController {
 
     private final MbtilesService mbtilesService;
@@ -46,6 +42,23 @@ public class TileController {
     @GetMapping(value = "/health", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> health() {
         return ResponseEntity.ok("UP | datasources=" + mbtilesService.getDataSourceCount());
+    }
+
+    /**
+     * 实时缓存监控端点 — 查看 Caffeine 内存缓存命中率、当前缓存容量与驱逐次数
+     */
+    @GetMapping(value = "/cache-stats", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> cacheStats() {
+        return ResponseEntity.ok(mbtilesService.getCacheStats());
+    }
+
+    /**
+     * 数据集热重载端点 — 动态重新载入磁盘上的 MBTiles 文件并重置连接池与缓存
+     */
+    @PostMapping(value = "/reload", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, String>> reloadDatasets() {
+        mbtilesService.reloadDatasets();
+        return ResponseEntity.ok(Map.of("status", "success", "message", "MBTiles 数据集与缓存已全部热重载"));
     }
 
     /**
@@ -89,6 +102,7 @@ public class TileController {
         tileJson.put("description", info.getDescription());
         tileJson.put("version", info.getVersion());
         tileJson.put("attribution", info.getAttribution());
+        tileJson.put("format", info.getFormat()); // 补齐标准 format 字段
         tileJson.put("scheme", "xyz");
         tileJson.put("tiles", List.of(tileUrl));
         tileJson.put("minzoom", info.getMinzoom());
@@ -117,9 +131,13 @@ public class TileController {
     }
 
     /**
-     * 获取指定坐标的矢量瓦片（PBF / Mapbox Vector Tile 格式）
+     * 获取指定坐标的矢量瓦片（同时支持 .pbf、.mvt 及无后缀路由）
      */
-    @GetMapping("/{datasetName}/{z}/{x}/{y}.pbf")
+    @GetMapping(value = {
+            "/{datasetName}/{z}/{x}/{y}.pbf",
+            "/{datasetName}/{z}/{x}/{y}.mvt",
+            "/{datasetName}/{z}/{x}/{y}"
+    })
     public ResponseEntity<byte[]> getVectorTile(
             @PathVariable String datasetName,
             @PathVariable int z,
@@ -141,22 +159,27 @@ public class TileController {
             return ResponseEntity.badRequest().build();
         }
 
-        // 3. 缩放层级前置短路：超出数据集 minzoom~maxzoom 范围直接响应 204，零数据库负载
+        // 3. 数据集元数据校验
         DatasetInfo info = mbtilesService.getDatasetInfo(datasetName);
         if (info == null) {
             return ResponseEntity.notFound().build();
         }
-        if (!info.isZoomValid(z)) {
+
+        // 4. 双重前置短路剪枝：
+        //    (a) 层级范围短路：z 不在 [minzoom, maxzoom]
+        //    (b) 空间拓扑短路：(x, y) 完全在数据集 BBox 外包矩形之外
+        //    超出范围直接响应 204，零缓存与数据库损耗
+        if (!info.isZoomValid(z) || !info.isTileWithinBounds(z, x, y)) {
             return ResponseEntity.noContent()
                     .header(HttpHeaders.CACHE_CONTROL, getCacheControlHeader())
                     .build();
         }
 
-        // 4. 查询瓦片（优先取 Caffeine 内存缓存，未命中则走 SQLite）
+        // 5. 查询瓦片（命中内存缓存或 SQLite，查无数据自动返回 TileEntry.EMPTY 单例）
         TileEntry tile = mbtilesService.getTile(datasetName, z, x, y);
 
-        if (tile == null) {
-            // 瓦片数据不存在返回 204 No Content，避免浏览器抛红报错
+        if (tile == null || tile.isEmpty()) {
+            // 瓦片数据不存在返回 204 No Content，前端不报红报错
             return ResponseEntity.noContent()
                     .header(HttpHeaders.CACHE_CONTROL, getCacheControlHeader())
                     .build();
@@ -164,7 +187,7 @@ public class TileController {
 
         String etag = tile.etag();
 
-        // 5. 遵循 RFC 7232 标准进行条件请求比对（支持 W/ 弱 ETag 与多 ETag 列表）
+        // 6. 遵循 RFC 7232 标准进行条件请求比对（支持 W/ 弱 ETag 与多 ETag 列表）
         if (matchesETag(etag, ifNoneMatch)) {
             return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
                     .header(HttpHeaders.ETAG, etag)

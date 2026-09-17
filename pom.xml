@@ -36,10 +36,11 @@
             <artifactId>HikariCP</artifactId>
         </dependency>
 
-        <!-- Lombok 简化实体与日志样板代码 -->
+        <!-- Lombok 简化实体与样板代码（显式声明兼容 JDK 17/21 的版本） -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
+            <version>1.18.30</version>
             <optional>true</optional>
         </dependency>
 

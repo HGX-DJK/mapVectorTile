@@ -1,7 +1,8 @@
 package com.map.mbtiles.service;
 
 import com.map.mbtiles.config.MbtilesProperties;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
@@ -16,9 +17,10 @@ import java.util.concurrent.CompletableFuture;
  * 将热点概览瓦片直接填充至 Caffeine 内存缓存，彻底消除冷启动首次访问延迟。
  * 异步后台执行，完全不阻塞应用本身的就绪启动。
  */
-@Slf4j
 @Component
 public class TileWarmupRunner implements ApplicationRunner {
+
+    private static final Logger log = LoggerFactory.getLogger(TileWarmupRunner.class);
 
     private final MbtilesService mbtilesService;
     private final MbtilesProperties properties;

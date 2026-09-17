@@ -1,10 +1,11 @@
-package com.map.mbtiles.service;
+package com.map.mbtiles.model;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Builder;
 import lombok.Data;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -13,13 +14,14 @@ import java.util.Map;
 
 /**
  * MBTiles 丰富元数据模型
- * 解析并封装 GIS 行业标准元数据属性（完全兼容 TileJSON 3.0 与 MBTiles 1.3 规范）
+ * 解析并封装 GIS 行业标准元数据属性（完全兼容 TileJSON 3.0 与 MBTiles 1.3 规范），
+ * 并提供缩放层级（Zoom）与地理空间外包矩形（BBox）的前置短路剪枝能力。
  */
-@Slf4j
 @Data
 @Builder
 public class DatasetInfo {
 
+    private static final Logger log = LoggerFactory.getLogger(DatasetInfo.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** 数据集名称（通常为文件名去掉 .mbtiles） */
@@ -65,6 +67,55 @@ public class DatasetInfo {
             return false;
         }
         return true;
+    }
+
+    /**
+     * 地理空间范围（BBox）拓扑短路校验：
+     * 根据墨卡托投影算法，计算当前缩放级别下该数据集对应的瓦片行列号边界。
+     * 若请求的 (x, y) 完全在数据集地理范围之外，则判定为无效，无需执行数据库查询。
+     *
+     * @param z 缩放层级
+     * @param x 瓦片列号
+     * @param y 瓦片行号 (XYZ)
+     * @return 瓦片是否在数据集地理范围（附带 1 个瓦片缓冲）内
+     */
+    public boolean isTileWithinBounds(int z, int x, int y) {
+        if (bounds == null || bounds.length < 4) {
+            return true;
+        }
+
+        // bounds 顺序：[西经(minLng), 南纬(minLat), 东经(maxLng), 北纬(maxLat)]
+        double minLng = bounds[0];
+        double minLat = bounds[1];
+        double maxLng = bounds[2];
+        double maxLat = bounds[3];
+
+        // 若覆盖全球范围或默认值，则无需剪枝
+        if (minLng <= -180.0 && maxLng >= 180.0 && minLat <= -85.0 && maxLat >= 85.0) {
+            return true;
+        }
+
+        int maxTiles = 1 << z;
+
+        // 经度对应 X 列号换算（附带 1 个瓦片的容错缓冲边界）
+        int minTileX = Math.max(0, (int) Math.floor((minLng + 180.0) / 360.0 * maxTiles) - 1);
+        int maxTileX = Math.min(maxTiles - 1, (int) Math.floor((maxLng + 180.0) / 360.0 * maxTiles) + 1);
+
+        if (x < minTileX || x > maxTileX) {
+            return false;
+        }
+
+        // 纬度对应 Y 行号换算（Web 墨卡托投影：北纬对应较小的 Y，南纬对应较大的 Y）
+        double clampedMaxLat = Math.min(85.05112878, Math.max(-85.05112878, maxLat));
+        double clampedMinLat = Math.min(85.05112878, Math.max(-85.05112878, minLat));
+
+        double maxLatRad = Math.toRadians(clampedMaxLat);
+        double minLatRad = Math.toRadians(clampedMinLat);
+
+        int minTileY = Math.max(0, (int) Math.floor((1.0 - Math.log(Math.tan(maxLatRad) + 1.0 / Math.cos(maxLatRad)) / Math.PI) / 2.0 * maxTiles) - 1);
+        int maxTileY = Math.min(maxTiles - 1, (int) Math.floor((1.0 - Math.log(Math.tan(minLatRad) + 1.0 / Math.cos(minLatRad)) / Math.PI) / 2.0 * maxTiles) + 1);
+
+        return y >= minTileY && y <= maxTileY;
     }
 
     /**

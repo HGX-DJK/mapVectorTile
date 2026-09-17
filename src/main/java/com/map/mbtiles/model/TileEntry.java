@@ -1,4 +1,4 @@
-package com.map.mbtiles.service;
+package com.map.mbtiles.model;
 
 /**
  * 瓦片缓存不可变包装对象（Record）
@@ -13,4 +13,19 @@ public record TileEntry(
         byte[] data,
         String etag,
         boolean gzipped
-) {}
+) {
+
+    /**
+     * 空瓦片单例常量，用于负向缓存防穿透。
+     * 当 SQLite 中不存在对应坐标的瓦片时，缓存此单例；
+     * 占用极小堆内存（0 字节数组），彻底杜绝空白区域反复穿透到 SQLite。
+     */
+    public static final TileEntry EMPTY = new TileEntry(new byte[0], "\"empty\"", false);
+
+    /**
+     * 判断当前瓦片是否为空瓦片
+     */
+    public boolean isEmpty() {
+        return this.data == null || this.data.length == 0;
+    }
+}

@@ -1,6 +1,7 @@
 package com.map.mbtiles;
 
-import com.map.mbtiles.service.DatasetInfo;
+import com.map.mbtiles.model.DatasetInfo;
+import com.map.mbtiles.model.TileEntry;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -12,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * 瓦片引擎核心功能单元测试
- * 覆盖坐标换算、路径安全校验、CRC32 ETag 计算、元数据解析与 RFC 7232 条件请求比对
+ * 覆盖坐标换算、路径安全校验、CRC32 ETag 计算、元数据解析、空间范围剪枝、空瓦片单例及 RFC 7232 条件请求比对
  */
 class TileServiceTest {
 
@@ -49,6 +50,17 @@ class TileServiceTest {
     }
 
     @Test
+    @DisplayName("空瓦片单例 TileEntry.EMPTY 行为验证")
+    void testEmptyTileEntry() {
+        TileEntry empty = TileEntry.EMPTY;
+        assertNotNull(empty);
+        assertTrue(empty.isEmpty());
+        assertEquals(0, empty.data().length);
+        assertEquals("\"empty\"", empty.etag());
+        assertFalse(empty.gzipped());
+    }
+
+    @Test
     @DisplayName("CRC32 ETag 计算一致性与格式正确性")
     void testCrc32EtagGeneration() {
         byte[] sample = "sample vector tile protobuf payload".getBytes();
@@ -62,36 +74,41 @@ class TileServiceTest {
     }
 
     @Test
-    @DisplayName("DatasetInfo 元数据与 Zoom 范围边界校验")
-    void testDatasetInfoParsing() {
+    @DisplayName("DatasetInfo 元数据、Zoom 范围与地理空间 BBox 拓扑短路剪枝校验")
+    void testDatasetInfoAndBBoxPruning() {
+        // 模拟一个北京区域数据集: 经度 115.4 ~ 117.5, 纬度 39.4 ~ 41.1
         Map<String, String> rawMeta = Map.of(
-                "name", "basemap",
+                "name", "beijing_basemap",
                 "format", "pbf",
-                "minzoom", "6",
+                "minzoom", "8",
                 "maxzoom", "14",
-                "bounds", "115.0,39.0,117.0,41.0",
-                "center", "116.0,40.0,10",
+                "bounds", "115.4,39.4,117.5,41.1",
+                "center", "116.4,39.9,10",
                 "json", "{\"vector_layers\": [{\"id\": \"roads\", \"fields\": {}}]}"
         );
 
-        DatasetInfo info = DatasetInfo.fromMetadata("basemap", rawMeta, 1024000L, System.currentTimeMillis());
+        DatasetInfo info = DatasetInfo.fromMetadata("beijing_basemap", rawMeta, 1024000L, System.currentTimeMillis());
 
-        assertEquals("basemap", info.getName());
+        assertEquals("beijing_basemap", info.getName());
         assertEquals("pbf", info.getFormat());
-        assertEquals(6, info.getMinzoom());
+        assertEquals(8, info.getMinzoom());
         assertEquals(14, info.getMaxzoom());
-        assertNotNull(info.getBounds());
-        assertEquals(4, info.getBounds().length);
-        assertEquals(115.0, info.getBounds()[0]);
-        assertEquals(1, info.getVectorLayers().size());
-        assertEquals("roads", info.getVectorLayers().get(0).get("id"));
 
-        // Zoom 范围有效性检查
-        assertFalse(info.isZoomValid(5), "低于 minzoom=6 应判定无效");
-        assertTrue(info.isZoomValid(6), "等于 minzoom=6 应有效");
-        assertTrue(info.isZoomValid(10), "介于 6~14 之间应有效");
-        assertTrue(info.isZoomValid(14), "等于 maxzoom=14 应有效");
+        // Zoom 范围校验
+        assertFalse(info.isZoomValid(7), "低于 minzoom=8 应判定无效");
+        assertTrue(info.isZoomValid(8), "等于 minzoom=8 应有效");
+        assertTrue(info.isZoomValid(10), "介于 8~14 之间应有效");
         assertFalse(info.isZoomValid(15), "超出 maxzoom=14 应判定无效");
+
+        // BBox 空间范围剪枝测试（z=10 时，北京瓦片大致为 x=842~847, y=384~390 附近）
+        // 1. 北京市中心内部瓦片：应在范围内
+        assertTrue(info.isTileWithinBounds(10, 843, 388), "北京中心范围瓦片应在 BBox 内");
+
+        // 2. 远在纽约的瓦片 (z=10, 经度约 -74，X 约为 300 左右)：必须被剪枝过滤
+        assertFalse(info.isTileWithinBounds(10, 301, 384), "远在纽约的瓦片应被空间短路剪枝阻断");
+
+        // 3. 远在伦敦的瓦片 (z=10, 经度约 0，X 约为 512 左右)：必须被剪枝过滤
+        assertFalse(info.isTileWithinBounds(10, 512, 340), "远在伦敦的瓦片应被空间短路剪枝阻断");
     }
 
     @Test

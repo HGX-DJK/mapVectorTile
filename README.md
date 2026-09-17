@@ -1,6 +1,6 @@
 # 🗺️ MBTiles Vector Tile Server
 
-高性能矢量瓦片服务器，基于 Spring Boot 构建，从 `.mbtiles` 文件读取并提供 PBF 格式的矢量瓦片数据，原生支持 TileJSON 3.0 规范。
+高性能矢量瓦片服务器，基于 Spring Boot 构建，从 `.mbtiles` 文件读取并提供 PBF / MVT 格式的矢量瓦片数据，原生支持 TileJSON 3.0 规范，具备零数据库负载的负向缓存与空间拓扑剪枝能力。
 
 ---
 
@@ -8,9 +8,12 @@
 
 - **🚀 毫秒级极速响应** — Caffeine 内存缓存 (50,000 条) + SQLite 2GB mmap 内存映射 I/O，热点瓦片 < 0.1ms 响应。
 - **⚡ 单 SQL 批量预热** — 启动时使用单条范围查询秒级预载低缩放级别瓦片，彻底告别冷启动抖动。
-- **🎯 Zoom 层级前置短路** — 自动解析数据集 `minzoom` 与 `maxzoom`，超出层级请求零数据库 I/O 直接响应 204。
+- **🎯 空间范围与层级双重短路** — 自动解析数据集 `minzoom`、`maxzoom` 及地理空间边界（BBox），超出物理范围请求零数据库 I/O 直接响应 204。
+- **🛡️ 空瓦片负向缓存防穿透** — 使用 `TileEntry.EMPTY` 单例缓存空白网格，彻底阻断大范围无要素区域对 SQLite 的穿透查询。
 - **📦 标准 TileJSON 3.0** — 支持 `/tiles/{dataset}/tilejson.json`，MapLibre GL JS / Mapbox GL JS 一行 URL 自动配置。
-- **📁 数据集目录发现** — 自动扫描 `data/` 目录，通过 `/tiles/datasets` 接口提供动态数据集元数据目录。
+- **🌐 全面兼容多客户端** — 瓦片接口原生同时支持 `.pbf`、`.mvt` 以及无后缀路由，无缝对接 QGIS、ArcGIS 与 Web 前端。
+- **📁 数据集目录与热重载** — 自动发现 `data/` 目录下的所有数据集（`/tiles/datasets`），并支持运行时免停机热重载（`POST /tiles/reload`）。
+- **📊 缓存指标实时监控** — 提供 `/tiles/cache-stats` 接口，实时掌握 Caffeine 命中率、缓存量与驱逐指标。
 - **🛡️ 生产级安全防护** — 严密防范路径穿越（Path Traversal）漏洞，白名单字符与标准路径双重校验。
 - **🔄 RFC 7232 条件请求** — 硬件加速 CRC32 ETag 生成，支持弱 ETag（`W/`）与多 ETag 识别，精准返回 304 零传输。
 - **🔇 异常优雅降级** — 自动静默捕获地图拖拽缩放产生的 `ClientAbortException` / `CloseNowException`，杜绝日志刷屏。
@@ -83,6 +86,7 @@ curl http://127.0.0.1:8445/tiles/basemap_line_point/tilejson.json
 {
   "tilejson": "3.0.0",
   "name": "basemap_line_point",
+  "format": "pbf",
   "scheme": "xyz",
   "tiles": [
     "http://127.0.0.1:8445/tiles/basemap_line_point/{z}/{x}/{y}.pbf"
@@ -100,9 +104,11 @@ curl http://127.0.0.1:8445/tiles/basemap_line_point/tilejson.json
 
 ---
 
-### 3. 获取矢量瓦片 (PBF)
+### 3. 获取矢量瓦片 (支持 .pbf / .mvt / 无后缀)
 ```http
 GET /tiles/{datasetName}/{z}/{x}/{y}.pbf
+GET /tiles/{datasetName}/{z}/{x}/{y}.mvt
+GET /tiles/{datasetName}/{z}/{x}/{y}
 ```
 
 | 参数 | 类型 | 说明 |
@@ -121,7 +127,7 @@ GET /tiles/{datasetName}/{z}/{x}/{y}.pbf
 
 **状态码说明：**
 - `200 OK`: 成功返回瓦片二进制流。
-- `204 No Content`: 该坐标不存在数据，或层级超出数据集有效范围（客户端不报红）。
+- `204 No Content`: 该坐标不存在数据，或层级/空间超出数据集有效范围（客户端不报红）。
 - `304 Not Modified`: 客户端 ETag 匹配（零字节传输）。
 - `400 Bad Request`: 非法参数或恶意路径穿越输入。
 - `404 Not Found`: 数据集不存在。
@@ -129,7 +135,32 @@ GET /tiles/{datasetName}/{z}/{x}/{y}.pbf
 
 ---
 
-### 4. 服务健康状态
+### 4. 实时监控与运维热重载接口
+
+#### 实时缓存指标
+```http
+GET /tiles/cache-stats
+```
+**响应示例：**
+```json
+{
+  "estimatedSize": 3412,
+  "hitCount": 18240,
+  "missCount": 1150,
+  "hitRate": "94.07%",
+  "evictionCount": 0,
+  "loadSuccessCount": 1150,
+  "activeDataSources": 1
+}
+```
+
+#### 数据集免停机热重载
+```http
+POST /tiles/reload
+```
+响应：`{"status":"success","message":"MBTiles 数据集与缓存已全部热重载"}`
+
+#### 服务健康状态
 ```http
 GET /tiles/health
 ```
@@ -212,7 +243,7 @@ map.addSource('mbtiles-source', {
 });
 ```
 
-### 3. OpenLayers
+### 3. OpenLayers（可使用 .mvt 或 .pbf）
 
 ```javascript
 import VectorTileLayer from 'ol/layer/VectorTile';
@@ -222,7 +253,7 @@ import MVT from 'ol/format/MVT';
 const layer = new VectorTileLayer({
   source: new VectorTileSource({
     format: new MVT(),
-    url: 'http://localhost:8445/tiles/basemap_line_point/{z}/{x}/{y}.pbf'
+    url: 'http://localhost:8445/tiles/basemap_line_point/{z}/{x}/{y}.mvt'
   })
 });
 ```
@@ -238,16 +269,17 @@ const layer = new VectorTileLayer({
              HTTP ETag 校验 ──→ 304 Not Modified (RFC 7232 规范匹配，0 字节传输)
                  │ 未命中
                  ▼
-             Zoom 层级短路校验 ──→ 204 No Content (超出 minzoom~maxzoom 零 I/O 返回)
-                 │ 合法层级
+             双重前置短路校验 ──→ 204 No Content (超出 minzoom~maxzoom 或 BBox 零 I/O 返回)
+                 │ 合法层级与空间范围
                  ▼
-             Caffeine 内存缓存 (50,000 条) ──→ 200 OK (命中，~0.1ms)
+             Caffeine 内存缓存 (50,000 条) ──→ 200 OK (命中实瓦片，~0.1ms)
+                 │ 命中 TileEntry.EMPTY 单例 ──→ 204 No Content (零 DB 穿透)
                  │ 未命中
                  ▼
              HikariCP 连接池 (10~20 连接)
                  │
                  ▼
-             SQLite 查询 (WAL + 联合索引 + 2GB mmap I/O) ──→ 200 OK (~5-15ms)
+             SQLite 查询 (WAL + 联合索引 + 2GB mmap I/O) ──→ 200 OK / 空瓦片单例 (~5-15ms)
 ```
 
 ---

@@ -1,8 +1,9 @@
 package com.map.mbtiles.controller;
 
-import lombok.extern.slf4j.Slf4j;
 import org.apache.catalina.connector.ClientAbortException;
 import org.apache.coyote.CloseNowException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -18,9 +19,10 @@ import java.sql.SQLException;
  * 确保所有错误均返回标准 HTTP 响应，杜绝浏览器报 Failed to fetch；
  * 针对地图快速缩放/平移时产生的客户端正常中断进行静默降级处理，避免日志刷屏。
  */
-@Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     /**
      * 路径参数类型不匹配（例如 z/x/y 传入非整数字符串）
