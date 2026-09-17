@@ -2,6 +2,7 @@ package com.map.mbtiles;
 
 import com.map.mbtiles.model.DatasetInfo;
 import com.map.mbtiles.model.TileEntry;
+import com.map.mbtiles.model.TileScheme;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -31,6 +32,28 @@ class TileServiceTest {
         // 逆转换验证
         int originalY = (1 << z) - 1 - tmsY;
         assertEquals(y, originalY);
+    }
+
+    @Test
+    @DisplayName("TileScheme 枚举解析、行列号双向转换与自适应映射正确性")
+    void testTileSchemeConversion() {
+        assertEquals(TileScheme.TMS, TileScheme.fromString("tms"));
+        assertEquals(TileScheme.TMS, TileScheme.fromString("TMS"));
+        assertEquals(TileScheme.XYZ, TileScheme.fromString("xyz"));
+        assertEquals(TileScheme.XYZ, TileScheme.fromString("XYZ"));
+        assertNull(TileScheme.fromString("unknown"));
+        assertNull(TileScheme.fromString(null));
+
+        int z = 10;
+        int webY = 418;
+
+        // TMS: 左下角原点，toDatabaseRow 必须翻转
+        assertEquals(605, TileScheme.TMS.toDatabaseRow(z, webY));
+        assertEquals(webY, TileScheme.TMS.toWebY(z, 605));
+
+        // XYZ: 左上角原点，toDatabaseRow 必须原样直传
+        assertEquals(418, TileScheme.XYZ.toDatabaseRow(z, webY));
+        assertEquals(webY, TileScheme.XYZ.toWebY(z, 418));
     }
 
     @Test

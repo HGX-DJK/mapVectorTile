@@ -3,6 +3,7 @@ package com.map.mbtiles.service;
 import com.map.mbtiles.config.MbtilesProperties;
 import com.map.mbtiles.model.DatasetInfo;
 import com.map.mbtiles.model.TileEntry;
+import com.map.mbtiles.model.TileScheme;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.slf4j.Logger;
@@ -30,6 +31,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -64,6 +66,10 @@ public class MbtilesService {
     private final Map<String, Long> lastAccessTimes = new ConcurrentHashMap<>();
     /** 数据集元数据结构体内存缓存 */
     private final Map<String, DatasetInfo> datasetInfoCache = new ConcurrentHashMap<>();
+    /** 每个数据集确定或已自愈锁定的坐标系规范 (TMS / XYZ) 映射 */
+    private final Map<String, TileScheme> datasetSchemes = new ConcurrentHashMap<>();
+    /** 记录已在 metadata 中显式硬性声明或已成功自愈锁定的数据集集合 */
+    private final Set<String> lockedSchemes = ConcurrentHashMap.newKeySet();
 
     public MbtilesService(MbtilesProperties properties, CacheManager cacheManager) {
         this.properties = properties;
@@ -336,9 +342,51 @@ public class MbtilesService {
     }
 
     /**
+     * 解析或获取指定数据集的坐标系规范（优先检查 metadata 声明，默认回退 TMS 规范）
+     */
+    public TileScheme getDatasetScheme(String datasetName) {
+        String normalizedName = normalizeDatasetName(datasetName);
+        if (normalizedName == null) {
+            return TileScheme.TMS;
+        }
+
+        return datasetSchemes.computeIfAbsent(normalizedName, name -> {
+            Map<String, String> meta = getMetadata(name);
+            if (meta != null && meta.containsKey("scheme")) {
+                TileScheme declared = TileScheme.fromString(meta.get("scheme"));
+                if (declared != null) {
+                    lockedSchemes.add(name);
+                    log.info("数据集 '{}' 从 metadata 中检测到显式坐标系规范: {}", name, declared);
+                    return declared;
+                }
+            }
+            // 默认遵循 MBTiles 官方规范 (TMS 左下角原点)
+            return TileScheme.TMS;
+        });
+    }
+
+    /**
+     * 从 SQLite 瓦片表中查询单瓦片二进制数据
+     */
+    private byte[] queryTileData(Connection conn, String sql, int z, int x, int row) throws SQLException {
+        try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setInt(1, z);
+            pstmt.setInt(2, x);
+            pstmt.setInt(3, row);
+            try (ResultSet rs = pstmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getBytes(1);
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * 获取指定坐标的矢量瓦片包装对象
      * 优先走 Caffeine 缓存；若未命中则查询 SQLite。
-     * 若 SQLite 中不存在该坐标数据，则返回并缓存 TileEntry.EMPTY 单例，杜绝大范围空白区域的穿透查询。
+     * 支持 TMS（左下角）与 XYZ（左上角）多坐标系自适应查询与反向自愈锁定。
+     * 若 SQLite 中不存在该坐标数据，则返回并缓存 TileEntry.EMPTY 单例，杜绝空白网格穿透。
      */
     @Cacheable(value = "tiles", key = "#datasetName + ':' + #z + ':' + #x + ':' + #y")
     public TileEntry getTile(String datasetName, int z, int x, int y) {
@@ -347,38 +395,46 @@ public class MbtilesService {
             return TileEntry.EMPTY;
         }
 
-        // MBTiles 标准采用 TMS 坐标系（原点在左下角），而 Web 请求为 XYZ 坐标系（原点在左上角），需进行 Y 轴转换
-        int tmsY = (1 << z) - 1 - y;
+        String normalizedName = normalizeDatasetName(datasetName);
+        TileScheme scheme = getDatasetScheme(normalizedName);
+        int targetRow = scheme.toDatabaseRow(z, y);
 
         String sql = "SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?";
 
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
+        try (Connection conn = dataSource.getConnection()) {
+            byte[] data = queryTileData(conn, sql, z, x, targetRow);
 
-            pstmt.setInt(1, z);
-            pstmt.setInt(2, x);
-            pstmt.setInt(3, tmsY);
-
-            try (ResultSet rs = pstmt.executeQuery()) {
-                if (rs.next()) {
-                    // 使用直接列索引 1 替代列名字符串检索，消除高并发下的元数据查找哈希开销
-                    byte[] data = rs.getBytes(1);
-                    if (data == null || data.length == 0) {
-                        return TileEntry.EMPTY;
-                    }
-
-                    // 采用硬件 SIMD 指令加速的 CRC32 计算 ETag
-                    CRC32 crc = new CRC32();
-                    crc.update(data);
-                    String etag = "\"" + Long.toHexString(crc.getValue()) + "\"";
-
-                    // 检查是否为 Gzip 压缩魔数 (0x1F, 0x8B)
-                    boolean gzipped = data.length >= 2
-                            && data[0] == (byte) 0x1F
-                            && data[1] == (byte) 0x8B;
-                    return new TileEntry(data, etag, gzipped);
+            // 若主推坐标未查出数据，且当前数据集尚未锁定坐标系，触发智能自愈反向探测
+            if ((data == null || data.length == 0) && !lockedSchemes.contains(normalizedName)) {
+                int alternateRow = (scheme == TileScheme.TMS) ? y : ((1 << z) - 1 - y);
+                byte[] altData = queryTileData(conn, sql, z, x, alternateRow);
+                if (altData != null && altData.length > 0) {
+                    TileScheme corrected = (scheme == TileScheme.TMS) ? TileScheme.XYZ : TileScheme.TMS;
+                    datasetSchemes.put(normalizedName, corrected);
+                    lockedSchemes.add(normalizedName);
+                    log.info("数据集 '{}' 查无 {} 瓦片但在反向坐标命中，已自动识别并自愈锁定为 {} 坐标系 (左{}角原点)",
+                            normalizedName, scheme, corrected, corrected == TileScheme.XYZ ? "上" : "下");
+                    data = altData;
+                } else {
+                    // 反向亦无数据，确为真实空白区域，锁定当前默认坐标系避免反复二次双查
+                    lockedSchemes.add(normalizedName);
                 }
             }
+
+            if (data == null || data.length == 0) {
+                return TileEntry.EMPTY;
+            }
+
+            // 采用硬件 SIMD 指令加速的 CRC32 计算 ETag
+            CRC32 crc = new CRC32();
+            crc.update(data);
+            String etag = "\"" + Long.toHexString(crc.getValue()) + "\"";
+
+            // 检查是否为 Gzip 压缩魔数 (0x1F, 0x8B)
+            boolean gzipped = data.length >= 2
+                    && data[0] == (byte) 0x1F
+                    && data[1] == (byte) 0x8B;
+            return new TileEntry(data, etag, gzipped);
 
         } catch (SQLException e) {
             log.error("查询瓦片出错 {}/{}/{}/{}: {}", datasetName, z, x, y, e.getMessage());
@@ -390,7 +446,7 @@ public class MbtilesService {
 
     /**
      * 单条范围 SQL 批量预加载指定层级以内的所有瓦片到 Caffeine 缓存
-     * 彻底消除成千上万次独立的 JDBC 单查往返
+     * 彻底消除成千上万次独立的 JDBC 单查往返，自适应识别 TMS/XYZ 行号并还原为 Web XYZ y
      */
     public int warmupDatasetBatch(String datasetName, int maxZoom) {
         DataSource dataSource = getDataSource(datasetName);
@@ -398,6 +454,7 @@ public class MbtilesService {
             return 0;
         }
 
+        TileScheme scheme = getDatasetScheme(datasetName);
         Cache tileCache = cacheManager.getCache("tiles");
         String sql = "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles WHERE zoom_level <= ?";
         int loaded = 0;
@@ -418,8 +475,8 @@ public class MbtilesService {
                         continue;
                     }
 
-                    // TMS 坐标转换为 XYZ 坐标
-                    int y = (1 << z) - 1 - tileRow;
+                    // 根据该数据集坐标系将数据库 tileRow 准确还原为 Web XYZ y
+                    int y = scheme.toWebY(z, tileRow);
 
                     CRC32 crc = new CRC32();
                     crc.update(data);
@@ -518,9 +575,11 @@ public class MbtilesService {
             log.info("已释放数据集 '{}' 的连接池资源", normalizedName);
         }
 
-        // 2. 清理元数据与访问时间戳
+        // 2. 清理元数据、访问时间戳与坐标系规范缓存
         lastAccessTimes.remove(normalizedName);
         datasetInfoCache.remove(normalizedName);
+        datasetSchemes.remove(normalizedName);
+        lockedSchemes.remove(normalizedName);
 
         // 3. 清理 Spring Cache 中的 metadata 缓存
         Cache metaCache = cacheManager.getCache("metadata");
@@ -582,5 +641,7 @@ public class MbtilesService {
         dataSources.clear();
         lastAccessTimes.clear();
         datasetInfoCache.clear();
+        datasetSchemes.clear();
+        lockedSchemes.clear();
     }
 }
