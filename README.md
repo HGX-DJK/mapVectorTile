@@ -1,20 +1,21 @@
 # 🗺️ MBTiles Vector Tile Server
 
-高性能矢量瓦片服务器，基于 Spring Boot 构建，从 `.mbtiles` 文件读取并提供 PBF 格式的矢量瓦片数据。
+高性能矢量瓦片服务器，基于 Spring Boot 构建，从 `.mbtiles` 文件读取并提供 PBF 格式的矢量瓦片数据，原生支持 TileJSON 3.0 规范，开箱即用内置 Web 地图可视化界面。
 
 ---
 
-## ✨ 特性
+## ✨ 核心特性
 
-- **HTTP/2 + HTTPS** — 多路复用消除浏览器 6 连接并发限制
-- **Caffeine 内存缓存** — 50,000 条瓦片热缓存，重复请求毫秒级响应
-- **ETag + 304 Not Modified** — 浏览器条件请求，零传输验证
-- **Cache-Control 7 天** — 静态瓦片长期浏览器本地缓存
-- **SQLite 深度调优** — 自动索引、WAL 模式、mmap 内存映射 I/O
-- **HikariCP 连接池** — 20 连接、5 秒快速超时、自动回收
-- **启动预加载** — 自动预热 z=0~6 低缩放级别瓦片
-- **全局异常处理** — 所有错误返回合理 HTTP 状态码，杜绝 `Failed to fetch`
-- **Gzip 智能处理** — 自动检测已压缩瓦片，避免二次压缩
+- **🚀 毫秒级极速响应** — Caffeine 内存缓存 (50,000 条) + SQLite 2GB mmap 内存映射 I/O，热点瓦片 < 0.1ms 响应。
+- **⚡ 单 SQL 批量预热** — 启动时使用单条范围查询秒级预载低缩放级别瓦片，彻底告别冷启动抖动。
+- **🎯 Zoom 层级前置短路** — 自动解析数据集 `minzoom` 与 `maxzoom`，超出层级请求零数据库 I/O 直接响应 204。
+- **📦 标准 TileJSON 3.0** — 支持 `/tiles/{dataset}/tilejson.json`，MapLibre GL JS / Mapbox GL JS 一行 URL 自动配置。
+- **🎨 内置 Web 可视化页面** — 启动后直接访问 `http://localhost:8445/` 交互式预览矢量地图、监控坐标与性能。
+- **📁 数据集目录发现** — 自动扫描 `data/` 目录，通过 `/tiles/datasets` 接口提供动态数据集元数据目录。
+- **🛡️ 生产级安全防护** — 严密防范路径穿越（Path Traversal）漏洞，白名单字符与标准路径双重校验。
+- **🔄 RFC 7232 条件请求** — 硬件加速 CRC32 ETag 生成，支持弱 ETag（`W/`）与多 ETag 识别，精准返回 304 零传输。
+- **🔇 异常优雅降级** — 自动静默捕获地图拖拽缩放产生的 `ClientAbortException` / `CloseNowException`，杜绝日志刷屏。
+- **🧩 Schema 全兼容** — 自动兼容扁平 Table 模式与 Tippecanoe View（视图）模式，针对性构建索引并激活 WAL。
 
 ---
 
@@ -22,7 +23,7 @@
 
 | 工具 | 版本 |
 |------|------|
-| **JDK** | 17+ |
+| **JDK** | 17+ (推荐 21+ 启用虚拟线程) |
 | **Maven** | 3.8+ |
 | **操作系统** | Windows / Linux / macOS |
 
@@ -30,34 +31,24 @@
 
 ## 🚀 快速开始
 
-### 1. 克隆项目
-
-```bash
-git clone <repository-url>
-cd mapVectorTile
-```
-
-### 2. 放置 MBTiles 数据文件
+### 1. 放置 MBTiles 数据文件
 
 将你的 `.mbtiles` 文件放入项目根目录的 `data/` 文件夹：
 
-```
+```text
 mapVectorTile/
 ├── data/
 │   ├── basemap_line_point.mbtiles    ← 你的瓦片数据
 │   └── another_dataset.mbtiles       ← 支持多个数据集
-├── src/
-├── pom.xml
-└── README.md
 ```
 
-### 3. 编译 & 运行
+### 2. 编译 & 运行
 
 ```bash
-# 编译
+# 编译打包
 mvn clean package -DskipTests
 
-# 运行（需在项目根目录执行，因为 data-dir 是相对路径）
+# 运行（可直接在根目录执行）
 java -jar target/mbtiles-server-0.0.1-SNAPSHOT.jar
 ```
 
@@ -67,72 +58,91 @@ java -jar target/mbtiles-server-0.0.1-SNAPSHOT.jar
 mvn spring-boot:run
 ```
 
-### 4. 访问瓦片
+### 3. 打开 Web 可视化预览
 
-服务启动后默认监听 `https://127.0.0.1:8443`。
-
-> ⚠️ **首次访问 HTTPS**：由于使用自签名证书，需先在浏览器中打开 `https://127.0.0.1:8443/tiles/health`，手动信任证书（点击"高级" → "继续访问"）。Chrome 用户如未看到继续按钮，可直接在页面上键入 `thisisunsafe`。
+服务默认监听 `http://localhost:8445/`。在浏览器打开即可进入内置地图查看器：
+- 自动扫描并列出 `data/` 目录下的所有 MBTiles 数据集；
+- 动态加载 TileJSON 并渲染矢量图层；
+- 实时显示鼠标经纬度、当前 Zoom 层级、鼠标所在瓦片坐标（Z/X/Y）；
+- 提供图层显示/隐藏控制与全图范围自适应。
 
 ---
 
-## 📡 API 接口
+## 📡 API 接口说明
 
-### 获取矢量瓦片
-
+### 1. 数据集目录接口
+```http
+GET /tiles/datasets
+GET /tiles
 ```
+返回所有已发现数据集的名称、文件大小、缩放范围、边界范围及图层信息。
+
+---
+
+### 2. 标准 TileJSON 3.0 元数据接口
+```http
+GET /tiles/{datasetName}/tilejson.json
+```
+**示例：**
+```bash
+curl http://127.0.0.1:8445/tiles/basemap_line_point/tilejson.json
+```
+**响应示例：**
+```json
+{
+  "tilejson": "3.0.0",
+  "name": "basemap_line_point",
+  "scheme": "xyz",
+  "tiles": [
+    "http://127.0.0.1:8445/tiles/basemap_line_point/{z}/{x}/{y}.pbf"
+  ],
+  "minzoom": 0,
+  "maxzoom": 14,
+  "bounds": [-180, -85.05112878, 180, 85.05112878],
+  "center": [116.4, 39.9, 10],
+  "vector_layers": [
+    { "id": "line", "fields": {} },
+    { "id": "point", "fields": {} }
+  ]
+}
+```
+
+---
+
+### 3. 获取矢量瓦片 (PBF)
+```http
 GET /tiles/{datasetName}/{z}/{x}/{y}.pbf
 ```
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `datasetName` | String | `.mbtiles` 文件名（**不含扩展名**） |
+| `datasetName` | String | `.mbtiles` 文件名（不含扩展名，需满足 `[a-zA-Z0-9_-]`） |
 | `z` | int | 缩放级别（0–22） |
 | `x` | int | 瓦片列号（0 ~ 2^z - 1） |
-| `y` | int | 瓦片行号（XYZ 坐标系，自动转 TMS） |
+| `y` | int | 瓦片行号（XYZ 坐标系，服务端自动转为 MBTiles TMS 坐标） |
 
 **响应头：**
+- `Content-Type`: `application/x-protobuf`
+- `Content-Encoding`: `gzip`（当数据在 MBTiles 中已压缩时）
+- `Cache-Control`: `public, max-age=604800, s-maxage=604800, immutable`
+- `ETag`: `"<hash>"`（CRC32 硬件加速校验值）
+- `Access-Control-Expose-Headers`: `ETag, Content-Length, Content-Encoding`
 
-| Header | 值 | 说明 |
-|--------|-----|------|
-| `Content-Type` | `application/x-protobuf` | PBF 矢量瓦片 |
-| `Content-Encoding` | `gzip`（如适用） | 仅当瓦片本身已压缩时设置 |
-| `Cache-Control` | `public, max-age=604800, immutable` | 浏览器缓存 7 天 |
-| `ETag` | `"<hash>"` | 基于内容的唯一标识 |
-| `Vary` | `Accept-Encoding` | CDN 分别缓存 |
-
-**示例：**
-
-```bash
-# 获取 basemap_line_point 数据集的 z=10, x=857, y=418 瓦片
-curl -k https://127.0.0.1:8443/tiles/basemap_line_point/10/857/418.pbf
-
-# 条件请求（如果 ETag 匹配则返回 304）
-curl -k -H 'If-None-Match: "1a2b3c4d"' \
-  https://127.0.0.1:8443/tiles/basemap_line_point/10/857/418.pbf
-```
-
-**状态码：**
-
-| 状态码 | 含义 |
-|--------|------|
-| `200` | 成功返回瓦片数据 |
-| `204` | 该坐标无瓦片数据（正常情况，非错误） |
-| `304` | 瓦片未修改（ETag 匹配） |
-| `400` | 参数无效（z/x/y 超出范围） |
-| `503` | 数据库暂时不可用 |
+**状态码说明：**
+- `200 OK`: 成功返回瓦片二进制流。
+- `204 No Content`: 该坐标不存在数据，或层级超出数据集有效范围（客户端不报红）。
+- `304 Not Modified`: 客户端 ETag 匹配（零字节传输）。
+- `400 Bad Request`: 非法参数或恶意路径穿越输入。
+- `404 Not Found`: 数据集不存在。
+- `503 Service Unavailable`: 数据库暂时不可用。
 
 ---
 
-### 健康检查
-
-```
+### 4. 服务健康状态
+```http
 GET /tiles/health
 ```
-
-```bash
-curl -k https://127.0.0.1:8443/tiles/health
-# 响应: UP | datasources=1
-```
+响应：`UP | datasources=1`
 
 ---
 
@@ -142,28 +152,27 @@ curl -k https://127.0.0.1:8443/tiles/health
 
 ```yaml
 server:
-  port: 8443                    # 服务端口
+  port: 8445                    # 监听端口
   http2:
-    enabled: true               # HTTP/2 多路复用
+    enabled: false               # HTTP/2 多路复用（开启需配合 HTTPS）
   ssl:
-    enabled: true               # HTTPS
-    key-store: classpath:keystore.p12
-    key-store-password: 123456
-    key-store-type: PKCS12
-    key-alias: maptile
+    enabled: false               # 是否启用 HTTPS
   compression:
     enabled: true               # HTTP 响应压缩
-    mime-types: application/x-protobuf,application/vnd.mapbox-vector-tile,...
-    min-response-size: 1024     # ≥1KB 的响应才压缩
-  tomcat:
-    threads:
-      max: 200                  # 最大工作线程
-      min-spare: 20             # 最小空闲线程
-    max-connections: 10000      # 最大连接数
-    accept-count: 300           # 等待队列长度
+    min-response-size: 1024
 
 mbtiles:
-  data-dir: ./data              # MBTiles 数据目录（相对于启动目录）
+  data-dir: ./data              # MBTiles 数据存放路径（相对或绝对路径）
+  pool:
+    max-size: 20                # 单数据集最大连接数（SQLite 推荐 10~20）
+    min-idle: 5                 # 最小空闲连接
+    connection-timeout: 30000   # 获取连接超时（毫秒）
+  warmup:
+    enabled: true               # 启动时是否自动预热
+    max-zoom: 6                 # 预热最大缩放层级（单 SQL 批量预加载）
+  cache-control:
+    max-age: 604800             # 浏览器缓存时长（默认 7 天）
+    immutable: true
 
 spring:
   cache:
@@ -172,107 +181,11 @@ spring:
       spec: maximumSize=50000,expireAfterAccess=30m,recordStats
 ```
 
-### 关键配置项
-
-| 配置 | 默认值 | 说明 |
-|------|--------|------|
-| `mbtiles.data-dir` | `./data` | MBTiles 文件目录，支持相对/绝对路径 |
-| `spring.cache.caffeine.spec` | 见上 | `maximumSize` 最大缓存条数，`expireAfterAccess` 空闲过期时间 |
-| `server.port` | `8443` | HTTPS 端口 |
-
-### 使用绝对路径（推荐用于生产环境）
-
-如果通过 `java -jar` 在非项目目录启动，建议使用绝对路径：
-
-```yaml
-mbtiles:
-  data-dir: D:/地图引擎/mapVectorTile/data
-```
-
-### 切换到 HTTP（无 HTTPS）
-
-如果不需要 HTTPS，删除 ssl 配置块并修改端口：
-
-```yaml
-server:
-  port: 8080
-  http2:
-    enabled: false    # HTTP/2 需要 HTTPS，关闭 SSL 时需一起关闭
-  # ssl:              ← 注释或删除整个 ssl 块
-```
-
 ---
 
-## 🏗️ 项目结构
+## 🔌 前端接入示例
 
-```
-mapVectorTile/
-├── data/                                    # MBTiles 数据文件目录
-│   └── basemap_line_point.mbtiles
-├── src/main/java/com/map/mbtiles/
-│   ├── MbtilesApplication.java              # Spring Boot 启动类
-│   ├── config/
-│   │   └── MbtilesProperties.java           # 配置属性映射
-│   ├── controller/
-│   │   ├── TileController.java              # 瓦片 REST API
-│   │   └── GlobalExceptionHandler.java      # 全局异常处理
-│   └── service/
-│       ├── MbtilesService.java              # 核心业务：SQLite 查询 + 缓存
-│       ├── TileEntry.java                   # 瓦片缓存包装对象
-│       └── TileWarmupRunner.java            # 启动预加载
-├── src/main/resources/
-│   ├── application.yml                      # 应用配置
-│   └── keystore.p12                         # HTTPS 自签名证书
-└── pom.xml                                  # Maven 依赖管理
-```
-
----
-
-## 🔧 性能架构
-
-### 请求链路
-
-```
-浏览器请求 ──→ 浏览器本地缓存 (7天)
-                 │ 未命中
-                 ▼
-             HTTP ETag 校验 ──→ 304 Not Modified (0字节传输)
-                 │ 未命中
-                 ▼
-             Caffeine 内存缓存 (50000条) ──→ 200 OK (命中，~0.1ms)
-                 │ 未命中
-                 ▼
-             HikariCP 连接池 (20连接)
-                 │
-                 ▼
-             SQLite 查询 (索引 + mmap I/O) ──→ 200 OK (~5-15ms)
-```
-
-### 四级缓存体系
-
-| 层级 | 技术 | 命中时延 | 容量 |
-|------|------|----------|------|
-| L1 | 浏览器 `Cache-Control` | **0ms** | 无限（磁盘） |
-| L2 | HTTP `ETag` / `304` | **~1ms** | 无限 |
-| L3 | Caffeine JVM 堆内存 | **~0.1ms** | 50,000 条 |
-| L4 | SQLite + mmap I/O | **~5-15ms** | 完整数据库 |
-
-### SQLite 优化项
-
-| 优化 | 说明 |
-|------|------|
-| 自动创建索引 | `(zoom_level, tile_column, tile_row)` 唯一索引 |
-| WAL 模式 | 读写分离，提升并发读取 |
-| 10000 页缓存 | ~40MB SQLite 内部页缓存 |
-| 64KB 页大小 | 大 BLOB 读取减少 I/O 次数 |
-| 2GB mmap | 内存映射文件，利用 OS 页缓存 |
-| 同步关闭 | `synchronous=OFF`，只读安全 |
-
----
-
-## 🔌 前端接入
-
-### MapLibre GL JS
+### 1. MapLibre GL JS（推荐：通过 TileJSON 一行接入）
 
 ```javascript
 const map = new maplibregl.Map({
@@ -282,32 +195,33 @@ const map = new maplibregl.Map({
     sources: {
       'mbtiles-source': {
         type: 'vector',
-        tiles: ['https://127.0.0.1:8443/tiles/basemap_line_point/{z}/{x}/{y}.pbf'],
-        maxzoom: 14
+        url: 'http://localhost:8445/tiles/basemap_line_point/tilejson.json'
       }
     },
-    layers: [{
-      id: 'lines',
-      type: 'line',
-      source: 'mbtiles-source',
-      'source-layer': 'your_layer_name',  // 替换为你的图层名
-      paint: { 'line-color': '#ff0000' }
-    }]
+    layers: [
+      {
+        id: 'lines-layer',
+        type: 'line',
+        source: 'mbtiles-source',
+        'source-layer': 'lines', // MBTiles 中的 vector_layer 名称
+        paint: { 'line-color': '#3b82f6', 'line-width': 1.5 }
+      }
+    ]
   }
 });
 ```
 
-### Mapbox GL JS
+### 2. Mapbox GL JS（模板 URL 方式）
 
 ```javascript
 map.addSource('mbtiles-source', {
   type: 'vector',
-  tiles: ['https://127.0.0.1:8443/tiles/basemap_line_point/{z}/{x}/{y}.pbf'],
+  tiles: ['http://localhost:8445/tiles/basemap_line_point/{z}/{x}/{y}.pbf'],
   maxzoom: 14
 });
 ```
 
-### OpenLayers
+### 3. OpenLayers
 
 ```javascript
 import VectorTileLayer from 'ol/layer/VectorTile';
@@ -317,58 +231,33 @@ import MVT from 'ol/format/MVT';
 const layer = new VectorTileLayer({
   source: new VectorTileSource({
     format: new MVT(),
-    url: 'https://127.0.0.1:8443/tiles/basemap_line_point/{z}/{x}/{y}.pbf'
+    url: 'http://localhost:8445/tiles/basemap_line_point/{z}/{x}/{y}.pbf'
   })
 });
 ```
 
 ---
 
-## 🛠️ 常见问题
+## 🔧 性能架构
 
-### Q: 浏览器报 `TypeError: Failed to fetch`
-
-**可能原因及解决方案：**
-
-1. **HTTPS 证书不受信任**（最常见）
-   - 先在浏览器打开 `https://127.0.0.1:8443/tiles/health`，手动接受证书
-   - 或改用 HTTP 模式（见配置说明）
-
-2. **连接池耗尽**
-   - 检查日志是否有 `Connection is not available` 错误
-   - 增大 `maximumPoolSize`（默认已设为 20）
-
-3. **瓦片坐标超出范围**
-   - 服务器会返回 `204 No Content`，不会引发 fetch 错误
-
-### Q: 首次请求很慢
-
-- 首次启动时 `TileWarmupRunner` 会自动预加载 z=0~6 的瓦片
-- 后续请求命中 Caffeine 缓存，响应时间 < 1ms
-- 检查是否创建了 SQLite 索引（启动日志中查看 `Verified/Created tile_index`）
-
-### Q: `不支持发行版本5` 编译错误
-
-`pom.xml` 中已配置 `<java.version>17</java.version>`，确保：
-- 系统 `JAVA_HOME` 指向 JDK 17+
-- Maven 使用的 JDK 版本正确：`mvn -version`
-
-### Q: `data-dir` 找不到数据
-
-`./data` 是相对路径，相对于**启动命令的工作目录**。如果用 `java -jar` 启动，请确保先 `cd` 到项目根目录，或在 `application.yml` 中使用绝对路径。
-
----
-
-## 📦 依赖清单
-
-| 依赖 | 用途 |
-|------|------|
-| `spring-boot-starter-web` | Web 框架 + 内嵌 Tomcat |
-| `spring-boot-starter-cache` | 缓存抽象层 |
-| `caffeine` | 高性能 JVM 内存缓存 |
-| `sqlite-jdbc` | SQLite JDBC 驱动 |
-| `HikariCP` | JDBC 连接池 |
-| `lombok` | 减少样板代码 |
+```text
+浏览器请求 ──→ 浏览器本地缓存 (7天)
+                 │ 未命中
+                 ▼
+             HTTP ETag 校验 ──→ 304 Not Modified (RFC 7232 规范匹配，0 字节传输)
+                 │ 未命中
+                 ▼
+             Zoom 层级短路校验 ──→ 204 No Content (超出 minzoom~maxzoom 零 I/O 返回)
+                 │ 合法层级
+                 ▼
+             Caffeine 内存缓存 (50,000 条) ──→ 200 OK (命中，~0.1ms)
+                 │ 未命中
+                 ▼
+             HikariCP 连接池 (10~20 连接)
+                 │
+                 ▼
+             SQLite 查询 (WAL + 联合索引 + 2GB mmap I/O) ──→ 200 OK (~5-15ms)
+```
 
 ---
 

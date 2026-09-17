@@ -1,9 +1,9 @@
 server:
-  port: 8443           # HTTPS 标准端口，区别于原来的 8080
+  port: 8445
   http2:
-    enabled: true      # 开启 HTTP/2，彻底消灭浏览器 6 连接限制
+    enabled: false         # 开启 HTTP/2 需要 HTTPS；若启用 SSL 可设为 true
   ssl:
-    enabled: true
+    enabled: false         # 若需要启用 HTTPS，设为 true 并确保 keystore.p12 存在
     key-store: classpath:keystore.p12
     key-store-password: 123456
     key-store-type: PKCS12
@@ -11,27 +11,38 @@ server:
   compression:
     enabled: true
     mime-types: application/x-protobuf,application/vnd.mapbox-vector-tile,application/json,text/plain,text/html
-    min-response-size: 1024   # 降低压缩阈值到 1KB，让更多小瓦片也能被压缩
+    min-response-size: 1024   # ≥1KB 的响应才压缩
   tomcat:
     threads:
-      max: 200        # 最大工作线程数（默认200，显式声明便于调整）
-      min-spare: 20   # 保持20个空闲线程随时处理突发请求
-    max-connections: 10000  # 最大连接数（提升到10000适应HTTP/2多路复用）
-    accept-count: 300       # 超出线程时允许排队的请求数
-    connection-timeout: 60000  # 连接超时60秒，给HTTP/2流更多时间完成响应
+      max: 200                # 最大工作线程数
+      min-spare: 20           # 最小空闲线程数
+    max-connections: 10000    # 最大连接数
+    accept-count: 300         # 排队等待队列长度
+    connection-timeout: 60000 # 连接超时时间 (ms)
 
 mbtiles:
-  # The directory where the multiple .mbtiles files are stored.
+  # MBTiles 数据文件存储目录（支持相对路径或绝对路径）
   data-dir: ./data
+  # SQLite HikariCP 连接池配置
+  pool:
+    max-size: 20              # 单数据集最大连接数（SQLite单机文件推荐 10~20）
+    min-idle: 5               # 最小空闲连接
+    connection-timeout: 30000 # 获取连接超时时间 (ms)
+    max-lifetime: 1800000     # 连接最大生命周期 (30分钟)
+  # 启动预加载热瓦片配置
+  warmup:
+    enabled: true             # 是否在启动时预热低缩放层级瓦片
+    max-zoom: 6               # 预热最大缩放层级 (0~maxZoom，单SQL批量预热)
+  # HTTP 缓存响应头
+  cache-control:
+    max-age: 604800           # 浏览器/CDN 缓存有效时长（秒，默认 7 天）
+    immutable: true           # 标记为 immutable 避免无意义的重复验证
 
 spring:
-  threads:
-    virtual:
-      enabled: true    # 虚拟线程：每个请求一个轻量级线程，不再受200线程池限制
   cache:
     type: caffeine
     caffeine:
-      # 扩大缓存: 50000条瓦片, 30分钟不访问过期, 开启统计监控命中率
+      # 瓦片内存缓存容量：最大 50,000 条，30 分钟无访问自动过期，记录命中率统计
       spec: maximumSize=50000,expireAfterAccess=30m,recordStats
 
 logging:
