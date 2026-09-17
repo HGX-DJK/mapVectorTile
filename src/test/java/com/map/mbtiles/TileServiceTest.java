@@ -10,6 +10,10 @@ import java.util.zip.CRC32;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * 瓦片引擎核心功能单元测试
+ * 覆盖坐标换算、路径安全校验、CRC32 ETag 计算、元数据解析与 RFC 7232 条件请求比对
+ */
 class TileServiceTest {
 
     private static final Pattern SAFE_DATASET_NAME = Pattern.compile("^[a-zA-Z0-9_-]+$");
@@ -35,7 +39,7 @@ class TileServiceTest {
         assertTrue(SAFE_DATASET_NAME.matcher("dataset-v1_2").matches());
         assertTrue(SAFE_DATASET_NAME.matcher("map123").matches());
 
-        // 恶意输入必须被拦截
+        // 恶意注入输入必须被成功拦截
         assertFalse(SAFE_DATASET_NAME.matcher("../secret").matches());
         assertFalse(SAFE_DATASET_NAME.matcher("..\\windows\\system32").matches());
         assertFalse(SAFE_DATASET_NAME.matcher("/etc/passwd").matches());
@@ -103,6 +107,9 @@ class TileServiceTest {
         assertFalse(matchesETag(serverEtag, null), "null 头部不应匹配");
     }
 
+    /**
+     * 辅助方法：校验 ETag 是否与客户端发送的 If-None-Match 请求头匹配
+     */
     private boolean matchesETag(String etag, String ifNoneMatch) {
         if (ifNoneMatch == null || ifNoneMatch.isBlank()) return false;
         String cleanEtag = stripQuotesAndWeak(etag);
@@ -114,6 +121,9 @@ class TileServiceTest {
         return false;
     }
 
+    /**
+     * 辅助方法：剥离弱标签前缀 W/ 与首尾引号
+     */
     private String stripQuotesAndWeak(String tag) {
         if (tag == null) return "";
         String t = tag.trim();

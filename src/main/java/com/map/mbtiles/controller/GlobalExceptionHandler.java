@@ -14,81 +14,79 @@ import java.io.IOException;
 import java.sql.SQLException;
 
 /**
- * Global exception handler — ensures ALL errors return a proper HTTP response
- * instead of an abrupt connection reset, which browsers report as "Failed to fetch".
- *
- * Silences expected client disconnects (rapid zooming/panning cancels in-flight tiles).
+ * 全局统一异常处理器
+ * 确保所有错误均返回标准 HTTP 响应，杜绝浏览器报 Failed to fetch；
+ * 针对地图快速缩放/平移时产生的客户端正常中断进行静默降级处理，避免日志刷屏。
  */
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     /**
-     * Path variable type mismatch (e.g. z/x/y is not a valid integer).
+     * 路径参数类型不匹配（例如 z/x/y 传入非整数字符串）
      */
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<String> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
-        log.warn("Invalid path parameter: {} = '{}' — expected {}",
+        log.warn("非法路径参数: {} = '{}' — 预期类型 {}",
                 ex.getName(), ex.getValue(), ex.getRequiredType());
         return ResponseEntity.badRequest()
                 .contentType(MediaType.TEXT_PLAIN)
-                .body("Invalid parameter: " + ex.getName());
+                .body("非法请求参数: " + ex.getName());
     }
 
     /**
-     * Invalid argument (e.g. malicious or malformed dataset name).
+     * 非法参数异常（如检测到恶意路径穿越符号或格式错误）
      */
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<String> handleIllegalArgument(IllegalArgumentException ex) {
-        log.warn("Bad request: {}", ex.getMessage());
+        log.warn("非法请求: {}", ex.getMessage());
         return ResponseEntity.badRequest()
                 .contentType(MediaType.TEXT_PLAIN)
                 .body(ex.getMessage());
     }
 
     /**
-     * Database connectivity issues — log full stack, return 503 so the browser
-     * retries instead of silently failing.
+     * 数据库连接与查询异常 — 记录堆栈并返回 503，便于客户端自动重试
      */
     @ExceptionHandler(SQLException.class)
     public ResponseEntity<String> handleSqlException(SQLException ex) {
-        log.error("Database error: {}", ex.getMessage(), ex);
+        log.error("瓦片数据库连接或查询异常: {}", ex.getMessage(), ex);
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .contentType(MediaType.TEXT_PLAIN)
-                .body("Tile database temporarily unavailable");
+                .body("瓦片数据库暂时不可用");
     }
 
     /**
-     * Client cancelled connection mid-response during rapid map panning/zooming.
-     * Both HTTP/2 (CloseNowException) and HTTP/1.1 (ClientAbortException / Broken pipe)
-     * are completely normal; silently discard without polluting logs.
+     * 客户端在地图平移、快速缩放时主动取消尚未完成的瓦片请求
+     * 包括 HTTP/2 流重置（CloseNowException）与 HTTP/1.1 客户端断开（ClientAbortException），
+     * 均属于地图前端正常交互行为，降级为 DEBUG 日志静默处理，不再打印 ERROR 错误堆栈。
      */
     @ExceptionHandler({CloseNowException.class, ClientAbortException.class})
     public void handleClientCancellation(Exception ex) {
-        log.debug("Client closed connection mid-response (navigation cancel): {}", ex.getMessage());
+        log.debug("客户端主动中止未完成的瓦片传输（地图快速平移或缩放取消）: {}", ex.getMessage());
     }
 
     /**
-     * General I/O exception — checks for broken pipes or connection resets.
+     * 常规 I/O 异常 — 识别并静默管道断开（Broken pipe）或连接被对端重置
      */
     @ExceptionHandler(IOException.class)
     public void handleIOException(IOException ex) {
         String msg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
         if (msg.contains("broken pipe") || msg.contains("connection reset") || msg.contains("closed")) {
-            log.debug("Client disconnected: {}", ex.getMessage());
+            log.debug("客户端网络连接中断: {}", ex.getMessage());
             return;
         }
-        log.warn("I/O error during tile transmission: {}", ex.getMessage());
+        log.warn("瓦片网络传输 I/O 异常: {}", ex.getMessage());
     }
 
     /**
-     * Catch-all for anything unexpected.
+     * 兜底未知系统级异常
      */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<String> handleGenericException(Exception ex) {
-        log.error("Unexpected error: {}", ex.getMessage(), ex);
+        log.error("服务器内部未捕获异常: {}", ex.getMessage(), ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .contentType(MediaType.TEXT_PLAIN)
-                .body("Internal server error");
+                .body("服务器内部错误");
     }
 }

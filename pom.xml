@@ -6,53 +6,57 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
         <version>3.2.3</version>
-        <relativePath/> <!-- lookup parent from repository -->
+        <relativePath/> <!-- 从 Maven 仓库检索父 POM -->
     </parent>
     <groupId>com.map</groupId>
     <artifactId>mbtiles-server</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>mbtiles-server</name>
-    <description>MBTiles Vector Tile Server</description>
+    <description>MBTiles 矢量瓦片高性能服务引擎</description>
     <properties>
         <java.version>17</java.version>
     </properties>
     <dependencies>
+        <!-- Spring Boot Web 核心依赖（集成内嵌 Tomcat） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
         
-        <!-- SQLite JDBC driver -->
+        <!-- SQLite JDBC 驱动 -->
         <dependency>
             <groupId>org.xerial</groupId>
             <artifactId>sqlite-jdbc</artifactId>
             <version>3.45.1.0</version>
         </dependency>
 
-        <!-- Connection Pool -->
+        <!-- HikariCP 高性能数据库连接池 -->
         <dependency>
             <groupId>com.zaxxer</groupId>
             <artifactId>HikariCP</artifactId>
         </dependency>
 
-        <!-- Lombok to reduce boilerplate -->
+        <!-- Lombok 简化实体与日志样板代码 -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
 
+        <!-- Spring Boot 测试套件 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
 
-        <!-- In-memory tile cache -->
+        <!-- Spring Cache 缓存抽象层 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-cache</artifactId>
         </dependency>
+        
+        <!-- Caffeine 高性能本地内存缓存 -->
         <dependency>
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>

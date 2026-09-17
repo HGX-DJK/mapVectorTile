@@ -15,6 +15,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 矢量瓦片 REST 控制器
+ * 提供瓦片二进制流响应、TileJSON 3.0 标准规范端点、数据集目录及健康检查
+ */
 @RestController
 @RequestMapping("/tiles")
 @CrossOrigin(
@@ -37,7 +41,7 @@ public class TileController {
     }
 
     /**
-     * Health check endpoint — useful for monitoring and verifying the server is alive.
+     * 服务健康检查端点 — 用于容器探针与监控服务存活状态
      */
     @GetMapping(value = "/health", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> health() {
@@ -45,7 +49,7 @@ public class TileController {
     }
 
     /**
-     * Dataset catalog endpoint — lists all available MBTiles datasets and their metadata summaries.
+     * 数据集目录发现接口 — 列出 data 目录下所有可用 MBTiles 数据集及其元数据概览
      */
     @GetMapping(value = {"", "/", "/datasets"}, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<List<DatasetInfo>> listDatasets() {
@@ -56,10 +60,10 @@ public class TileController {
     }
 
     /**
-     * Standard TileJSON 3.0 specification endpoint.
-     * Frontends (MapLibre GL JS, Mapbox GL JS, OpenLayers) can auto-configure sources using this URL.
+     * 标准 TileJSON 3.0 规范端点
+     * MapLibre GL JS / Mapbox GL JS / OpenLayers 可直接通过该 URL 自动配置图层、边界与瓦片地址
      *
-     * Example: GET /tiles/basemap_line_point/tilejson.json
+     * 示例：GET /tiles/basemap_line_point/tilejson.json
      */
     @GetMapping(value = "/{datasetName}/tilejson.json", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getTileJson(
@@ -75,6 +79,7 @@ public class TileController {
             return ResponseEntity.notFound().build();
         }
 
+        // 动态根据客户端请求上下文组装瓦片模板 URL
         String baseUrl = resolveBaseUrl(request);
         String tileUrl = baseUrl + "/tiles/" + datasetName + "/{z}/{x}/{y}.pbf";
 
@@ -100,8 +105,8 @@ public class TileController {
     }
 
     /**
-     * Backward-compatible metadata endpoint.
-     * Returns standard TileJSON attributes alongside raw MBTiles metadata.
+     * 向后兼容的元数据接口
+     * 返回符合 TileJSON 标准的元数据实体
      */
     @GetMapping(value = "/{datasetName}/metadata.json", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> getMetadata(
@@ -112,7 +117,7 @@ public class TileController {
     }
 
     /**
-     * Fetch vector tile in Mapbox Vector Tile (PBF) format.
+     * 获取指定坐标的矢量瓦片（PBF / Mapbox Vector Tile 格式）
      */
     @GetMapping("/{datasetName}/{z}/{x}/{y}.pbf")
     public ResponseEntity<byte[]> getVectorTile(
@@ -122,12 +127,12 @@ public class TileController {
             @PathVariable int y,
             @RequestHeader(value = HttpHeaders.IF_NONE_MATCH, required = false) String ifNoneMatch) {
 
-        // 1. Safety validation: prevent path traversal attacks
+        // 1. 安全校验：防止路径遍历注入
         if (!mbtilesService.isValidDatasetName(datasetName)) {
             return ResponseEntity.badRequest().build();
         }
 
-        // 2. Coordinate range validation
+        // 2. 坐标数值基础范围校验
         if (z < 0 || z > 22 || x < 0 || y < 0) {
             return ResponseEntity.badRequest().build();
         }
@@ -136,7 +141,7 @@ public class TileController {
             return ResponseEntity.badRequest().build();
         }
 
-        // 3. Zoom range fast short-circuit from dataset metadata
+        // 3. 缩放层级前置短路：超出数据集 minzoom~maxzoom 范围直接响应 204，零数据库负载
         DatasetInfo info = mbtilesService.getDatasetInfo(datasetName);
         if (info == null) {
             return ResponseEntity.notFound().build();
@@ -147,10 +152,11 @@ public class TileController {
                     .build();
         }
 
-        // 4. Retrieve tile (from Caffeine or SQLite)
+        // 4. 查询瓦片（优先取 Caffeine 内存缓存，未命中则走 SQLite）
         TileEntry tile = mbtilesService.getTile(datasetName, z, x, y);
 
         if (tile == null) {
+            // 瓦片数据不存在返回 204 No Content，避免浏览器抛红报错
             return ResponseEntity.noContent()
                     .header(HttpHeaders.CACHE_CONTROL, getCacheControlHeader())
                     .build();
@@ -158,7 +164,7 @@ public class TileController {
 
         String etag = tile.etag();
 
-        // 5. RFC 7232 compliant conditional GET check (supports W/"..." and comma-separated tags)
+        // 5. 遵循 RFC 7232 标准进行条件请求比对（支持 W/ 弱 ETag 与多 ETag 列表）
         if (matchesETag(etag, ifNoneMatch)) {
             return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
                     .header(HttpHeaders.ETAG, etag)
@@ -172,6 +178,7 @@ public class TileController {
         headers.set(HttpHeaders.ETAG, etag);
         headers.set(HttpHeaders.VARY, "Accept-Encoding");
 
+        // 若瓦片数据在 MBTiles 中已预压缩，直接声明 Content-Encoding，防止内嵌容器二次压缩
         if (tile.gzipped()) {
             headers.set(HttpHeaders.CONTENT_ENCODING, "gzip");
         }
@@ -180,7 +187,7 @@ public class TileController {
     }
 
     /**
-     * Resolves the external base URL respecting reverse proxy headers (X-Forwarded-Proto, X-Forwarded-Host).
+     * 解析外部访问的 Base URL，自动识别反向代理头（X-Forwarded-Proto、X-Forwarded-Host）
      */
     private String resolveBaseUrl(HttpServletRequest request) {
         String scheme = request.getHeader("X-Forwarded-Proto");
@@ -205,7 +212,7 @@ public class TileController {
     }
 
     /**
-     * Checks if the given ETag matches the client's If-None-Match header according to RFC 7232.
+     * 校验 ETag 是否与客户端发送的 If-None-Match 请求头相匹配（RFC 7232 规范实现）
      */
     private boolean matchesETag(String etag, String ifNoneMatch) {
         if (ifNoneMatch == null || ifNoneMatch.isBlank()) {
@@ -225,6 +232,9 @@ public class TileController {
         return false;
     }
 
+    /**
+     * 剥离弱 ETag 标识前缀（W/）及首尾双引号
+     */
     private String stripQuotesAndWeak(String tag) {
         if (tag == null) {
             return "";

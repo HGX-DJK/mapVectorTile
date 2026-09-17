@@ -1,6 +1,6 @@
 # 🗺️ MBTiles Vector Tile Server
 
-高性能矢量瓦片服务器，基于 Spring Boot 构建，从 `.mbtiles` 文件读取并提供 PBF 格式的矢量瓦片数据，原生支持 TileJSON 3.0 规范，开箱即用内置 Web 地图可视化界面。
+高性能矢量瓦片服务器，基于 Spring Boot 构建，从 `.mbtiles` 文件读取并提供 PBF 格式的矢量瓦片数据，原生支持 TileJSON 3.0 规范。
 
 ---
 
@@ -10,7 +10,6 @@
 - **⚡ 单 SQL 批量预热** — 启动时使用单条范围查询秒级预载低缩放级别瓦片，彻底告别冷启动抖动。
 - **🎯 Zoom 层级前置短路** — 自动解析数据集 `minzoom` 与 `maxzoom`，超出层级请求零数据库 I/O 直接响应 204。
 - **📦 标准 TileJSON 3.0** — 支持 `/tiles/{dataset}/tilejson.json`，MapLibre GL JS / Mapbox GL JS 一行 URL 自动配置。
-- **🎨 内置 Web 可视化页面** — 启动后直接访问 `http://localhost:8445/` 交互式预览矢量地图、监控坐标与性能。
 - **📁 数据集目录发现** — 自动扫描 `data/` 目录，通过 `/tiles/datasets` 接口提供动态数据集元数据目录。
 - **🛡️ 生产级安全防护** — 严密防范路径穿越（Path Traversal）漏洞，白名单字符与标准路径双重校验。
 - **🔄 RFC 7232 条件请求** — 硬件加速 CRC32 ETag 生成，支持弱 ETag（`W/`）与多 ETag 识别，精准返回 304 零传输。
@@ -57,14 +56,6 @@ java -jar target/mbtiles-server-0.0.1-SNAPSHOT.jar
 ```bash
 mvn spring-boot:run
 ```
-
-### 3. 打开 Web 可视化预览
-
-服务默认监听 `http://localhost:8445/`。在浏览器打开即可进入内置地图查看器：
-- 自动扫描并列出 `data/` 目录下的所有 MBTiles 数据集；
-- 动态加载 TileJSON 并渲染矢量图层；
-- 实时显示鼠标经纬度、当前 Zoom 层级、鼠标所在瓦片坐标（Z/X/Y）；
-- 提供图层显示/隐藏控制与全图范围自适应。
 
 ---
 

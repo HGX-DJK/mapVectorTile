@@ -10,11 +10,11 @@ import java.io.File;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Warms up the Caffeine tile cache on application startup.
+ * 启动预热执行器
  *
- * Uses a single range query per dataset to batch-preload tiles up to maxZoom,
- * eliminating thousands of sequential SQLite roundtrips.
- * Runs asynchronously so it does NOT delay application startup.
+ * 在应用启动完成后，自动对各个 MBTiles 数据集的低缩放级别（如 z=0~6）进行单 SQL 批量流式预热，
+ * 将热点概览瓦片直接填充至 Caffeine 内存缓存，彻底消除冷启动首次访问延迟。
+ * 异步后台执行，完全不阻塞应用本身的就绪启动。
  */
 @Slf4j
 @Component
@@ -32,23 +32,23 @@ public class TileWarmupRunner implements ApplicationRunner {
     public void run(ApplicationArguments args) {
         MbtilesProperties.WarmupProperties warmupProps = properties.getWarmup();
         if (!warmupProps.isEnabled()) {
-            log.info("Tile warmup is disabled in configuration.");
+            log.info("瓦片预热功能已在配置中禁用。");
             return;
         }
 
         File dataDir = new File(properties.getDataDir());
         if (!dataDir.exists() || !dataDir.isDirectory()) {
-            log.warn("Data directory not found: {}, skipping warmup", dataDir.getAbsolutePath());
+            log.warn("MBTiles 数据存储目录不存在: {}, 跳过预热", dataDir.getAbsolutePath());
             return;
         }
 
         File[] mbtilesFiles = dataDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".mbtiles"));
         if (mbtilesFiles == null || mbtilesFiles.length == 0) {
-            log.info("No .mbtiles files found, skipping warmup");
+            log.info("未发现任何 .mbtiles 数据文件，跳过预热");
             return;
         }
 
-        // Run warmup asynchronously so the server starts accepting requests immediately
+        // 异步后台运行预热，使 HTTP 服务能够瞬间就绪并开始对外响应
         CompletableFuture.runAsync(() -> {
             for (File file : mbtilesFiles) {
                 String datasetName = file.getName().substring(0, file.getName().length() - 8);
@@ -58,16 +58,16 @@ public class TileWarmupRunner implements ApplicationRunner {
     }
 
     /**
-     * Batch pre-loads tiles for zoom levels 0 up to maxZoom.
+     * 批量预加载指定数据集从 z=0 至 maxZoom 的所有瓦片
      */
     private void warmupDataset(String datasetName, int maxZoom) {
-        log.info("Starting fast batch tile warmup for dataset '{}' (zoom 0~{})...", datasetName, maxZoom);
+        log.info("正在对数据集 '{}' 执行批量瓦片预热 (层级: 0 ~ {})...", datasetName, maxZoom);
         long start = System.currentTimeMillis();
 
         int count = mbtilesService.warmupDatasetBatch(datasetName, maxZoom);
 
         long elapsed = System.currentTimeMillis() - start;
-        log.info("Batch warmup complete for '{}': {} tiles preloaded into cache in {} ms",
+        log.info("数据集 '{}' 批量预热完成: 共将 {} 个瓦片载入内存缓存，耗时 {} 毫秒",
                 datasetName, count, elapsed);
     }
 }
