@@ -60,7 +60,7 @@ public class TileWarmupRunner implements ApplicationRunner {
             // 未配置白名单时，至多预热前 maxDatasets 个数据集（默认 3 个）
             int limit = Math.min(datasets.size(), warmupProps.getMaxDatasets());
             targetNames = datasets.stream()
-                    .map(DatasetInfo::getName)
+                    .map(d -> d.getId() != null ? d.getId() : d.getName())
                     .limit(limit)
                     .collect(Collectors.toList());
             log.info("检测到 {} 个数据集，按策略预热前 {} 个核心数据集: {}", datasets.size(), limit, targetNames);

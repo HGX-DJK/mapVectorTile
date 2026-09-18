@@ -240,13 +240,15 @@ public class TileController {
         }
 
         // 2. 坐标数值基础范围校验 (z 最大支持到 30，防止 1 << z 发生 32 位整型溢出)
-        if (z < 0 || z > 30 || x < 0 || y < 0) {
+        if (z < 0 || z > 30 || y < 0) {
             return ResponseEntity.badRequest().build();
         }
         int maxCoord = 1 << z;
-        if (x >= maxCoord || y >= maxCoord) {
+        if (y >= maxCoord) {
             return ResponseEntity.badRequest().build();
         }
+        // 经度水平循环归一化（支持世界地图水平无限滚动，杜绝跨 180° 经线时的越界 400 白块）
+        int normalizedX = ((x % maxCoord) + maxCoord) % maxCoord;
 
         // 3. 数据集元数据校验
         DatasetInfo info = mbtilesService.getDatasetInfo(resolvedName);
@@ -262,9 +264,9 @@ public class TileController {
                     .build();
         }
 
-        //    (b) 空间拓扑短路（可选）：仅在显式配置开启 bounds-filter-enabled 且 (x, y) 完全在 BBox 矩形外才拦截
+        //    (b) 空间拓扑短路（可选）：仅在显式配置开启 bounds-filter-enabled 且 (normalizedX, y) 完全在 BBox 矩形外才拦截
         //        默认关闭：彻底杜绝元数据 bounds 标小导致的边缘有效切片被误杀返回 204
-        if (properties.isBoundsFilterEnabled() && !info.isTileWithinBounds(z, x, y)) {
+        if (properties.isBoundsFilterEnabled() && !info.isTileWithinBounds(z, normalizedX, y)) {
             return ResponseEntity.noContent()
                     .header(HttpHeaders.CACHE_CONTROL, NO_CONTENT_CACHE_CONTROL)
                     .build();
@@ -272,7 +274,12 @@ public class TileController {
 
         // 4.1 RFC 7232 日期条件请求秒级短路校验（If-Modified-Since 纳秒拦截）：
         //     若客户端携带时间戳且数据集文件未发生物理修改，瞬间响应 304，彻底跳过 Caffeine 缓存与 SQLite 检索
-        long ifModifiedSince = request.getDateHeader(HttpHeaders.IF_MODIFIED_SINCE);
+        long ifModifiedSince = -1;
+        try {
+            ifModifiedSince = request.getDateHeader(HttpHeaders.IF_MODIFIED_SINCE);
+        } catch (IllegalArgumentException ignored) {
+            // 忽略非标时间戳请求头
+        }
         if (ifModifiedSince != -1 && info.getLastModified() <= ifModifiedSince + 1000) {
             HttpHeaders notModifiedHeaders = new HttpHeaders();
             notModifiedHeaders.set(HttpHeaders.CACHE_CONTROL, getCacheControlHeader());
@@ -283,7 +290,7 @@ public class TileController {
         }
 
         // 5. 查询瓦片（命中内存缓存或 SQLite，查无数据自动返回 TileEntry.EMPTY 单例）
-        TileEntry tile = mbtilesService.getTile(resolvedName, z, x, y);
+        TileEntry tile = mbtilesService.getTile(resolvedName, z, normalizedX, y);
 
         if (tile == null || tile.isEmpty()) {
             return ResponseEntity.noContent()
@@ -346,6 +353,7 @@ public class TileController {
         if (sendGzip) {
             headers.set(HttpHeaders.CONTENT_ENCODING, "gzip");
         }
+        headers.setContentLength(responseData.length);
 
         return new ResponseEntity<>(responseData, headers, HttpStatus.OK);
     }

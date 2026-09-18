@@ -10,8 +10,8 @@ server:
     key-alias: maptile
   compression:
     enabled: true
-    mime-types: application/x-protobuf,application/vnd.mapbox-vector-tile,application/json,text/plain,text/html
-    min-response-size: 1024   # ≥1KB 的响应才压缩
+    mime-types: application/json,text/plain,text/html,text/xml,application/xml
+    min-response-size: 1024   # ≥1KB 的文本与 JSON 响应才由 Tomcat 压缩；切片已在库内压缩无需二次压缩
   tomcat:
     threads:
       max: 200                # 最大工作线程数
@@ -19,17 +19,19 @@ server:
     max-connections: 10000    # 最大连接数
     accept-count: 300         # 排队等待队列长度
     connection-timeout: 60000 # 连接超时时间 (ms)
+    max-keep-alive-requests: -1 # 保持 HTTP Keep-Alive 长连接无上限，避免地图拖拽频繁断开重新握手
+    keep-alive-timeout: 60000ms # 空闲连接保活 60 秒
 
 mbtiles:
   # MBTiles / SQLite 数据文件存储目录（支持相对路径或绝对路径）
   data-dir: ./data
   # 是否开启基于元数据 bounds 的空间短路过滤（默认 false：彻底杜绝元数据标小导致的边缘切片误杀白块）
   bounds-filter-enabled: false
-  # SQLite HikariCP 连接池配置（针对多文件海量数据源自动缩容）
+  # SQLite HikariCP 连接池配置（针对多文件海量数据源高并发低延迟调优）
   pool:
-    max-size: 15              # 单数据集最大并发连接数（SQLite 推荐 10~15）
-    min-idle: 0               # 最小空闲连接：设为 0，无请求时连接自动释放归零，杜绝文件句柄耗尽
-    idle-timeout: 60000       # 60 秒无请求自动回收该连接
+    max-size: 40              # 单数据集最大并发连接数提升至 40，保障一屏 30~50 瓦片瞬间并发无排队
+    min-idle: 10              # 最小常驻空闲连接设为 10，保持热连接就绪，彻底消除冷启动几十毫秒的文件重开耗时
+    idle-timeout: 600000      # 10 分钟无请求才缓慢释放超出 min-idle 的多余连接
     connection-timeout: 30000 # 获取连接超时时间 (ms)
     max-lifetime: 1800000     # 连接最大生命周期 (30分钟)
     max-active-pools: 50      # 最多常驻 50 个数据源连接池，超出时按 LRU 淘汰最久未访问连接池

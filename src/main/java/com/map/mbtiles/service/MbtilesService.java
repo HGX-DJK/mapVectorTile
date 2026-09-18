@@ -188,7 +188,7 @@ public class MbtilesService {
             // 2. 配置针对只读高并发场景深度调优的 SQLite PRAGMA 参数
             SQLiteConfig sqLiteConfig = new SQLiteConfig();
             sqLiteConfig.setReadOnly(true);
-            sqLiteConfig.setCacheSize(10000);           // 单连接 ~40 MB 内部页缓存
+            sqLiteConfig.setCacheSize(5000);            // 单连接适度分配内部页缓存，主导由 OS MMAP 提供纳秒级映射
             if (mbtilesFile.canWrite()) {
                 sqLiteConfig.setJournalMode(SQLiteConfig.JournalMode.WAL);
                 sqLiteConfig.setSynchronous(SQLiteConfig.SynchronousMode.OFF);
@@ -199,6 +199,9 @@ public class MbtilesService {
             sqLiteConfig.setTempStore(SQLiteConfig.TempStore.MEMORY);
             // 开启 2GB 内存映射 I/O（mmap），充分利用操作系统的 Page Cache 减少内核态拷贝
             sqLiteConfig.setPragma(SQLiteConfig.Pragma.MMAP_SIZE, "2147483648");
+            // 开启 WAL 模式读未提交（Read Uncommitted），消除多连接只读并发时的行锁与页锁竞争
+            sqLiteConfig.setReadUncommitted(true);
+            sqLiteConfig.setBusyTimeout(30000);
 
             MbtilesProperties.PoolProperties poolProps = properties.getPool();
 
@@ -602,9 +605,6 @@ public class MbtilesService {
                     log.info("数据集 '{}' 查无 {} 瓦片但在反向坐标命中，已自动识别并自愈锁定为 {} 坐标系 (左{}角原点)",
                             normalizedName, scheme, corrected, corrected == TileScheme.XYZ ? "上" : "下");
                     data = altData;
-                } else {
-                    // 反向亦无数据，确为真实空白区域，锁定当前默认坐标系避免反复二次双查
-                    lockedSchemes.add(normalizedName);
                 }
             }
 

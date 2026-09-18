@@ -25,7 +25,9 @@ public class DatasetInfo {
     private static final Logger log = LoggerFactory.getLogger(DatasetInfo.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** 数据集名称（通常为文件名去掉 .mbtiles） */
+    /** 数据集路由唯一标识（即文件路径去除后缀，如 basemap_line_point 或 vector/roads） */
+    private String id;
+    /** 数据集名称（通常为文件名去掉 .mbtiles 或 metadata 中的 name 声明） */
     private String name;
     /** 数据集描述信息 */
     private String description;
@@ -270,6 +272,7 @@ public class DatasetInfo {
         }
 
         return DatasetInfo.builder()
+                .id(datasetName)
                 .name(meta.getOrDefault("name", datasetName))
                 .description(meta.getOrDefault("description", ""))
                 .format(meta.getOrDefault("format", "pbf"))

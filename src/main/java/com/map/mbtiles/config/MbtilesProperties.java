@@ -61,12 +61,12 @@ public class MbtilesProperties {
      */
     @Data
     public static class PoolProperties {
-        /** 单数据集最大连接数（SQLite 单文件引擎推荐 10~20） */
-        private int maxSize = 15;
-        /** 最小空闲连接数（设为 0 可在无请求时自动缩容归零，释放文件句柄） */
-        private int minIdle = 0;
-        /** 空闲连接超时时间（毫秒，默认 60 秒无访问自动回收连接） */
-        private long idleTimeout = 60000;
+        /** 单数据集最大连接数（SQLite 并发只读场景推荐 30~50） */
+        private int maxSize = 40;
+        /** 最小常驻空闲连接数（设为 10，杜绝高频请求时的连接重开与文件句柄频繁初始化延迟） */
+        private int minIdle = 10;
+        /** 空闲连接超时时间（毫秒，默认 10 分钟无访问才释放多余空闲连接） */
+        private long idleTimeout = 600000;
         /** 获取连接超时时间（毫秒） */
         private long connectionTimeout = 30000;
         /** 连接最大生存周期（毫秒，默认 30 分钟） */
