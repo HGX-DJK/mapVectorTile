@@ -1,23 +1,22 @@
 package com.map.mbtiles.controller;
 
-import org.apache.catalina.connector.ClientAbortException;
-import org.apache.coyote.CloseNowException;
+import com.map.mbtiles.model.ApiErrorResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
-import java.io.IOException;
-import java.sql.SQLException;
+import javax.servlet.http.HttpServletRequest;
 
 /**
- * 全局统一异常处理器
- * 确保所有错误均返回标准 HTTP 响应，杜绝浏览器报 Failed to fetch；
- * 针对地图快速缩放/平移时产生的客户端正常中断进行静默降级处理，避免日志刷屏。
+ * 全局统一 RESTful 异常处理器（兼容 Java 8）
+ * 拦截并统一包装各类 Web 异常为标准 ApiErrorResponse 结构，杜绝框架默认 HTML 报错与堆栈泄露
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -25,70 +24,120 @@ public class GlobalExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     /**
-     * 路径参数类型不匹配（例如 z/x/y 传入非整数字符串）
+     * 处理 URL 路径参数或查询参数类型不匹配异常（如 z/x/y 传入了非数字字符）
      */
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
-    public ResponseEntity<String> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
-        log.warn("非法路径参数: {} = '{}' — 预期类型 {}",
-                ex.getName(), ex.getValue(), ex.getRequiredType());
-        return ResponseEntity.badRequest()
-                .contentType(MediaType.TEXT_PLAIN)
-                .body("非法请求参数: " + ex.getName());
+    public ResponseEntity<ApiErrorResponse> handleMethodArgumentTypeMismatch(
+            MethodArgumentTypeMismatchException ex, HttpServletRequest request) {
+
+        String paramName = ex.getName();
+        String expectedType = ex.getRequiredType() != null ? ex.getRequiredType().getSimpleName() : "未知类型";
+        Object actualValue = ex.getValue();
+
+        String message = String.format("参数 '%s' 类型不匹配: 传入值为 '%s'，预期类型为 %s",
+                paramName, actualValue, expectedType);
+        log.warn("客户端请求参数类型错误 [{}]: {}", request.getRequestURI(), message);
+
+        ApiErrorResponse body = new ApiErrorResponse(
+                HttpStatus.BAD_REQUEST.value(),
+                HttpStatus.BAD_REQUEST.getReasonPhrase(),
+                message,
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
     }
 
     /**
-     * 非法参数异常（如检测到恶意路径穿越符号或格式错误）
+     * 处理缺少必要请求参数异常
+     */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<ApiErrorResponse> handleMissingServletRequestParameter(
+            MissingServletRequestParameterException ex, HttpServletRequest request) {
+
+        String message = String.format("缺少必填请求参数: '%s' (类型: %s)", ex.getParameterName(), ex.getParameterType());
+        log.warn("客户端请求缺少必要参数 [{}]: {}", request.getRequestURI(), message);
+
+        ApiErrorResponse body = new ApiErrorResponse(
+                HttpStatus.BAD_REQUEST.value(),
+                HttpStatus.BAD_REQUEST.getReasonPhrase(),
+                message,
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+    }
+
+    /**
+     * 处理 HTTP 请求 Method 不支持异常（如对 GET 接口发 POST）
+     */
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<ApiErrorResponse> handleHttpRequestMethodNotSupported(
+            HttpRequestMethodNotSupportedException ex, HttpServletRequest request) {
+
+        String message = String.format("当前接口不支持 HTTP %s 请求，仅支持: %s",
+                ex.getMethod(), String.join(", ", ex.getSupportedMethods() != null ? ex.getSupportedMethods() : new String[0]));
+        log.warn("不支持的 HTTP 请求方法 [{}]: {}", request.getRequestURI(), message);
+
+        ApiErrorResponse body = new ApiErrorResponse(
+                HttpStatus.METHOD_NOT_ALLOWED.value(),
+                HttpStatus.METHOD_NOT_ALLOWED.getReasonPhrase(),
+                message,
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED).body(body);
+    }
+
+    /**
+     * 处理 Content-Type 媒体类型不支持异常
+     */
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<ApiErrorResponse> handleHttpMediaTypeNotSupported(
+            HttpMediaTypeNotSupportedException ex, HttpServletRequest request) {
+
+        String message = String.format("不支持的媒体类型 (Content-Type): %s", ex.getContentType());
+        log.warn("不支持的媒体类型 [{}]: {}", request.getRequestURI(), message);
+
+        ApiErrorResponse body = new ApiErrorResponse(
+                HttpStatus.UNSUPPORTED_MEDIA_TYPE.value(),
+                HttpStatus.UNSUPPORTED_MEDIA_TYPE.getReasonPhrase(),
+                message,
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE).body(body);
+    }
+
+    /**
+     * 处理非法参数业务异常
      */
     @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<String> handleIllegalArgument(IllegalArgumentException ex) {
-        log.warn("非法请求: {}", ex.getMessage());
-        return ResponseEntity.badRequest()
-                .contentType(MediaType.TEXT_PLAIN)
-                .body(ex.getMessage());
+    public ResponseEntity<ApiErrorResponse> handleIllegalArgument(
+            IllegalArgumentException ex, HttpServletRequest request) {
+
+        log.warn("非法业务参数请求 [{}]: {}", request.getRequestURI(), ex.getMessage());
+
+        ApiErrorResponse body = new ApiErrorResponse(
+                HttpStatus.BAD_REQUEST.value(),
+                HttpStatus.BAD_REQUEST.getReasonPhrase(),
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
     }
 
     /**
-     * 数据库连接与查询异常 — 记录堆栈并返回 503，便于客户端自动重试
-     */
-    @ExceptionHandler(SQLException.class)
-    public ResponseEntity<String> handleSqlException(SQLException ex) {
-        log.error("瓦片数据库连接或查询异常: {}", ex.getMessage(), ex);
-        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                .contentType(MediaType.TEXT_PLAIN)
-                .body("瓦片数据库暂时不可用");
-    }
-
-    /**
-     * 客户端在地图平移、快速缩放时主动取消尚未完成的瓦片请求
-     * 包括 HTTP/2 流重置（CloseNowException）与 HTTP/1.1 客户端断开（ClientAbortException），
-     * 均属于地图前端正常交互行为，降级为 DEBUG 日志静默处理，不再打印 ERROR 错误堆栈。
-     */
-    @ExceptionHandler({CloseNowException.class, ClientAbortException.class})
-    public void handleClientCancellation(Exception ex) {
-        log.debug("客户端主动中止未完成的瓦片传输（地图快速平移或缩放取消）: {}", ex.getMessage());
-    }
-
-    /**
-     * 常规 I/O 异常 — 识别并静默管道断开（Broken pipe）或连接被对端重置
-     */
-    @ExceptionHandler(IOException.class)
-    public void handleIOException(IOException ex) {
-        String msg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
-        if (msg.contains("broken pipe") || msg.contains("connection reset") || msg.contains("closed")) {
-            log.debug("客户端网络连接中断: {}", ex.getMessage());
-            return;
-        }
-        log.warn("瓦片网络传输 I/O 异常: {}", ex.getMessage());
-    }
-
-    /**
-     * 兜底未知系统级异常
+     * 兜底捕获所有未被处理的系统异常
      */
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<String> handleGenericException(Exception ex) {
-        log.error("服务器内部未捕获异常: {}", ex.getMessage(), ex);
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .contentType(MediaType.TEXT_PLAIN)
-                .body("服务器内部错误");
+    public ResponseEntity<ApiErrorResponse> handleGenericException(
+            Exception ex, HttpServletRequest request) {
+
+        log.error("系统处理请求发生未捕获异常 [{}]: {}", request.getRequestURI(), ex.getMessage(), ex);
+
+        ApiErrorResponse body = new ApiErrorResponse(
+                HttpStatus.INTERNAL_SERVER_ERROR.value(),
+                HttpStatus.INTERNAL_SERVER_ERROR.getReasonPhrase(),
+                "服务器内部处理异常，请联系系统管理员或查看服务端日志",
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
     }
 }

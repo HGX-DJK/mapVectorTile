@@ -56,6 +56,11 @@ mbtiles:
     #     zoom-column: zoom_level
     #     col-column: tile_column
     #     row-column: tile_row
+  # 切片文件变动智能热感知监听器（自动感知新增切片与覆盖更新）
+  watcher:
+    enabled: true                 # 开启后台自动监听
+    watch-dir: ""                 # 可选：自定义监听目录（留空时默认自动监听上方 data-dir，支持相对路径如 ./data 或绝对路径如 D:/gis_data）
+    debounce-ms: 1500             # 拷贝/修改防抖延迟（毫秒），等待大文件写入完成再重载
 
 spring:
   cache:

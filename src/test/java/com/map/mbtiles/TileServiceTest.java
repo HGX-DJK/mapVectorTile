@@ -322,4 +322,43 @@ class TileServiceTest {
         if (t.startsWith("\"") && t.endsWith("\"") && t.length() >= 2) t = t.substring(1, t.length() - 1);
         return t;
     }
+
+    @Test
+    @DisplayName("ApiErrorResponse 结构体与 JSON 序列化规范性测试")
+    void testApiErrorResponse() throws Exception {
+        com.map.mbtiles.model.ApiErrorResponse err = new com.map.mbtiles.model.ApiErrorResponse(
+                400, "Bad Request", "瓦片坐标参数类型错误", "/tiles/beijing/abc/1/2.pbf", 1789710000000L
+        );
+        assertEquals(400, err.getStatus());
+        assertEquals("Bad Request", err.getError());
+        assertEquals("瓦片坐标参数类型错误", err.getMessage());
+        assertEquals("/tiles/beijing/abc/1/2.pbf", err.getPath());
+        assertEquals(1789710000000L, err.getTimestamp());
+
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        String json = mapper.writeValueAsString(err);
+        assertTrue(json.contains("\"status\":400"));
+        assertTrue(json.contains("\"error\":\"Bad Request\""));
+        assertTrue(json.contains("\"message\":\"瓦片坐标参数类型错误\""));
+        assertTrue(json.contains("\"path\":\"/tiles/beijing/abc/1/2.pbf\""));
+    }
+
+    @Test
+    @DisplayName("DataDirectoryWatcher 路径提取与子目录解析正确性测试")
+    void testWatcherDatasetNameResolution() {
+        com.map.mbtiles.service.DataDirectoryWatcher watcher = new com.map.mbtiles.service.DataDirectoryWatcher(null, null);
+        java.nio.file.Path rootDir = java.nio.file.Paths.get("data");
+
+        // 顶层文件
+        java.nio.file.Path file1 = java.nio.file.Paths.get("data", "beijing.mbtiles");
+        assertEquals("beijing", watcher.resolveDatasetName(rootDir, file1));
+
+        // 1级子目录文件
+        java.nio.file.Path file2 = java.nio.file.Paths.get("data", "vector", "roads.db");
+        assertEquals("vector/roads", watcher.resolveDatasetName(rootDir, file2));
+
+        // 2级子目录文件
+        java.nio.file.Path file3 = java.nio.file.Paths.get("data", "2026", "base", "lines.sqlite");
+        assertEquals("2026/base/lines", watcher.resolveDatasetName(rootDir, file3));
+    }
 }

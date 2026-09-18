@@ -45,6 +45,11 @@ public class MbtilesProperties {
     private SchemaProperties schema = new SchemaProperties();
 
     /**
+     * data 目录切片文件动态监听配置（自动感知增删改与热重载）
+     */
+    private WatcherProperties watcher = new WatcherProperties();
+
+    /**
      * 连接池详细参数配置（针对多文件海量数据源场景深度调优）
      */
     @Data
@@ -129,5 +134,18 @@ public class MbtilesProperties {
         private String zoomColumn;
         private String colColumn;
         private String rowColumn;
+    }
+
+    /**
+     * data 目录智能热感知监听器参数配置
+     */
+    @Data
+    public static class WatcherProperties {
+        /** 是否启用后台文件变动监听（默认开启） */
+        private boolean enabled = true;
+        /** 自定义监听目录（留空时默认自动监听 mbtiles.data-dir 目录，支持绝对路径或相对路径） */
+        private String watchDir = "";
+        /** 写入事件防抖延迟等待时间（毫秒，默认 1500ms），等待大文件完全拷贝完毕再触发重载 */
+        private long debounceMs = 1500;
     }
 }
