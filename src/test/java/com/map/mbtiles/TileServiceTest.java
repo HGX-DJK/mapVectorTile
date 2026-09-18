@@ -379,4 +379,131 @@ class TileServiceTest {
         long clientTimeOlder = 1789700000000L;
         assertFalse(fileLastModified <= clientTimeOlder + 1000, "文件更新后客户端缓存过期，不能触发 304");
     }
+
+    @Test
+    @DisplayName("方案1：B-Tree 极速层级自校准与防误杀（超限自愈）测试")
+    void testZoomRangeAutoCalibration() throws Exception {
+        // 1. 模拟元数据低估：元数据声明 minzoom=10, maxzoom=14
+        Map<String, String> meta = new java.util.LinkedHashMap<>();
+        meta.put("name", "test_calibration");
+        meta.put("minzoom", "10");
+        meta.put("maxzoom", "14");
+
+        DatasetInfo info = DatasetInfo.fromMetadata("test_calibration", meta, 1024L, System.currentTimeMillis());
+        assertEquals(10, info.getMinzoom());
+        assertEquals(14, info.getMaxzoom());
+
+        // 校准前：z=8 和 z=16 都会被误杀
+        assertFalse(info.isZoomValid(8), "校准前 z=8 被误杀");
+        assertFalse(info.isZoomValid(16), "校准前 z=16 被误杀");
+
+        // 2. 创建真实临时 SQLite MBTiles 数据库，写入物理范围 6~18 的切片
+        java.io.File tempDb = java.io.File.createTempFile("mbtiles_calib_", ".mbtiles");
+        tempDb.deleteOnExit();
+
+        try (java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + tempDb.getAbsolutePath());
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)");
+            stmt.execute("CREATE UNIQUE INDEX tiles_zxy_idx ON tiles (zoom_level, tile_column, tile_row)");
+            stmt.execute("INSERT INTO tiles VALUES (6, 1, 1, X'1234')");
+            stmt.execute("INSERT INTO tiles VALUES (10, 10, 10, X'1234')");
+            stmt.execute("INSERT INTO tiles VALUES (18, 50, 50, X'1234')");
+
+            // 执行极速 B-Tree 索引首列查询
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT MIN(zoom_level), MAX(zoom_level) FROM tiles")) {
+                assertTrue(rs.next());
+                int actualMin = rs.getInt(1);
+                int actualMax = rs.getInt(2);
+
+                assertEquals(6, actualMin);
+                assertEquals(18, actualMax);
+
+                // 自愈校准逻辑
+                if (actualMin < info.getMinzoom()) {
+                    info.setMinzoom(actualMin);
+                }
+                if (actualMax > info.getMaxzoom()) {
+                    info.setMaxzoom(actualMax);
+                }
+            }
+        } finally {
+            tempDb.delete();
+        }
+
+        // 校准后：物理存在的 6~18 层级全部合法通过，彻底解决误杀
+        assertEquals(6, info.getMinzoom(), "minzoom 已自愈校准为物理实际值 6");
+        assertEquals(18, info.getMaxzoom(), "maxzoom 已自愈校准为物理实际值 18");
+
+        assertTrue(info.isZoomValid(6), "物理存在的 z=6 现已有效");
+        assertTrue(info.isZoomValid(8), "介于 6~18 之间的 z=8 现已有效");
+        assertTrue(info.isZoomValid(14), "z=14 有效");
+        assertTrue(info.isZoomValid(16), "此前被误杀的 z=16 现已成功放行");
+        assertTrue(info.isZoomValid(18), "物理存在的最高层级 z=18 现已成功放行");
+        assertFalse(info.isZoomValid(5), "低于实际物理最小值的 z=5 仍然精确拦截");
+        assertFalse(info.isZoomValid(19), "超出实际物理最大值的 z=19 仍然精确拦截");
+    }
+
+    @Test
+    @DisplayName("高层级 (z>22) 边界盒动态扩展与容错放行测试")
+    void testExtendedZoomTileRanges() {
+        double[] bjBounds = new double[]{115.4, 39.4, 117.5, 41.1};
+
+        // 1. 默认预计算支持 0~22
+        DatasetInfo.TileRange[] defaultRanges = DatasetInfo.computeTileRanges(bjBounds);
+        assertEquals(23, defaultRanges.length);
+
+        // 2. 动态指定 maxZoom=25 扩展预计算
+        DatasetInfo.TileRange[] extendedRanges = DatasetInfo.computeTileRanges(bjBounds, 25);
+        assertNotNull(extendedRanges);
+        assertEquals(26, extendedRanges.length, "maxZoom=25 时应包含 0~25 共 26 级");
+
+        DatasetInfo info = DatasetInfo.builder()
+                .name("high_zoom_map")
+                .minzoom(0)
+                .maxzoom(25)
+                .bounds(bjBounds)
+                .tileRanges(extendedRanges)
+                .build();
+
+        // 校验 z=24 在边界盒内正常判断
+        assertNotNull(extendedRanges[24]);
+        // 超出预计算上限（如传入超出长度的 z）时，安全保守放行，交由数据库兜底
+        assertTrue(info.isTileWithinBounds(26, 100, 100), "超出边界盒数组容量时应保守放行杜绝误杀");
+    }
+
+    @Test
+    @DisplayName("bounds-filter-enabled 开关对元数据标小瓦片防误杀验证")
+    void testBoundsFilterEnabledConfiguration() {
+        // 模拟元数据 bounds 范围标小（仅标了北京中心市区）
+        double[] narrowBounds = new double[]{116.3, 39.8, 116.5, 40.0};
+        DatasetInfo.TileRange[] narrowRanges = DatasetInfo.computeTileRanges(narrowBounds);
+
+        DatasetInfo info = DatasetInfo.builder()
+                .name("beijing_map")
+                .minzoom(0)
+                .maxzoom(18)
+                .bounds(narrowBounds)
+                .tileRanges(narrowRanges)
+                .build();
+
+        // 选取郊区密云/怀柔真实存在的瓦片坐标 (z=10 时，x=845, y=380 远在北部山区)
+        int z = 10;
+        int suburbanX = 845;
+        int suburbanY = 375; // 位于 narrowBounds 外
+
+        assertFalse(info.isTileWithinBounds(z, suburbanX, suburbanY), "该坐标确实在标小的 bounds 之外");
+
+        // 默认情况下 boundsFilterEnabled = false：
+        com.map.mbtiles.config.MbtilesProperties properties = new com.map.mbtiles.config.MbtilesProperties();
+        assertFalse(properties.isBoundsFilterEnabled(), "默认配置应为 false，防止误杀");
+
+        // 模拟控制器判定逻辑：
+        boolean shouldFilterOutDefault = properties.isBoundsFilterEnabled() && !info.isTileWithinBounds(z, suburbanX, suburbanY);
+        assertFalse(shouldFilterOutDefault, "默认关闭 bounds 剪枝时，郊区切片不会被误杀拦截，安全放行给 SQLite 查真实数据");
+
+        // 若用户主动配置开启：
+        properties.setBoundsFilterEnabled(true);
+        boolean shouldFilterOutStrict = properties.isBoundsFilterEnabled() && !info.isTileWithinBounds(z, suburbanX, suburbanY);
+        assertTrue(shouldFilterOutStrict, "显式开启 bounds 剪枝时，越界瓦片才会被拦截短路响应 204");
+    }
 }

@@ -162,17 +162,28 @@ public class DatasetInfo {
         if (tileRanges == null) {
             return true;
         }
-        if (z < 0 || z >= tileRanges.length) {
+        if (z < 0) {
             return false;
+        }
+        if (z >= tileRanges.length) {
+            // 超出预计算范围时，保守放行，由后续 SQLite 真实检索兜底，防止误杀高层级瓦片
+            return true;
         }
         TileRange range = tileRanges[z];
         return range == null || range.contains(x, y);
     }
 
     /**
-     * 预计算 0~22 各层级的瓦片边界范围盒（墨卡托投影三角函数与对数只计算一次）
+     * 预计算默认 0~22 各层级的瓦片边界范围盒（墨卡托投影三角函数与对数只计算一次）
      */
     public static TileRange[] computeTileRanges(double[] bounds) {
+        return computeTileRanges(bounds, 22);
+    }
+
+    /**
+     * 预计算指定最高层级的瓦片边界范围盒（支持高层级动态扩展）
+     */
+    public static TileRange[] computeTileRanges(double[] bounds, int maxZoom) {
         if (bounds == null || bounds.length < 4) {
             return null;
         }
@@ -201,8 +212,9 @@ public class DatasetInfo {
         double xFactor1 = (minLng + 180.0) / 360.0;
         double xFactor2 = (maxLng + 180.0) / 360.0;
 
-        TileRange[] ranges = new TileRange[23]; // 覆盖 z = 0..22
-        for (int z = 0; z <= 22; z++) {
+        int targetMax = Math.min(30, Math.max(22, maxZoom));
+        TileRange[] ranges = new TileRange[targetMax + 1];
+        for (int z = 0; z <= targetMax; z++) {
             int maxTiles = 1 << z;
 
             int minTileX = Math.max(0, (int) Math.floor(xFactor1 * maxTiles) - 1);

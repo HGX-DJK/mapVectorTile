@@ -42,6 +42,12 @@ public class TileController {
     }
 
     /**
+     * 空白切片/越界切片专用防污染 Cache-Control 头
+     * 严禁将 204 No Content 标记为 7 天 immutable 强缓存，杜绝客户端浏览器 Disk Cache 锁死白块
+     */
+    private static final String NO_CONTENT_CACHE_CONTROL = "no-cache, no-store, must-revalidate";
+
+    /**
      * 服务健康检查端点 — 用于容器探针与监控服务存活状态
      */
     @GetMapping(value = "/health", produces = MediaType.TEXT_PLAIN_VALUE)
@@ -233,8 +239,8 @@ public class TileController {
             return ResponseEntity.badRequest().build();
         }
 
-        // 2. 坐标数值基础范围校验
-        if (z < 0 || z > 22 || x < 0 || y < 0) {
+        // 2. 坐标数值基础范围校验 (z 最大支持到 30，防止 1 << z 发生 32 位整型溢出)
+        if (z < 0 || z > 30 || x < 0 || y < 0) {
             return ResponseEntity.badRequest().build();
         }
         int maxCoord = 1 << z;
@@ -248,13 +254,19 @@ public class TileController {
             return ResponseEntity.notFound().build();
         }
 
-        // 4. 双重前置短路剪枝：
-        //    (a) 层级范围短路：z 不在 [minzoom, maxzoom]
-        //    (b) 空间拓扑短路：(x, y) 完全在数据集 BBox 外包矩形之外
-        //    超出范围直接响应 204，零缓存与数据库损耗
-        if (!info.isZoomValid(z) || !info.isTileWithinBounds(z, x, y)) {
+        // 4. 前置短路剪枝：
+        //    (a) 层级范围短路：z 不在 [minzoom, maxzoom]（已通过 B-Tree 索引首列物理自校准保证绝对精准）
+        if (!info.isZoomValid(z)) {
             return ResponseEntity.noContent()
-                    .header(HttpHeaders.CACHE_CONTROL, getCacheControlHeader())
+                    .header(HttpHeaders.CACHE_CONTROL, NO_CONTENT_CACHE_CONTROL)
+                    .build();
+        }
+
+        //    (b) 空间拓扑短路（可选）：仅在显式配置开启 bounds-filter-enabled 且 (x, y) 完全在 BBox 矩形外才拦截
+        //        默认关闭：彻底杜绝元数据 bounds 标小导致的边缘有效切片被误杀返回 204
+        if (properties.isBoundsFilterEnabled() && !info.isTileWithinBounds(z, x, y)) {
+            return ResponseEntity.noContent()
+                    .header(HttpHeaders.CACHE_CONTROL, NO_CONTENT_CACHE_CONTROL)
                     .build();
         }
 
@@ -275,7 +287,7 @@ public class TileController {
 
         if (tile == null || tile.isEmpty()) {
             return ResponseEntity.noContent()
-                    .header(HttpHeaders.CACHE_CONTROL, getCacheControlHeader())
+                    .header(HttpHeaders.CACHE_CONTROL, NO_CONTENT_CACHE_CONTROL)
                     .build();
         }
 

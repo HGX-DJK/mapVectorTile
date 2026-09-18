@@ -23,6 +23,8 @@ server:
 mbtiles:
   # MBTiles / SQLite 数据文件存储目录（支持相对路径或绝对路径）
   data-dir: ./data
+  # 是否开启基于元数据 bounds 的空间短路过滤（默认 false：彻底杜绝元数据标小导致的边缘切片误杀白块）
+  bounds-filter-enabled: false
   # SQLite HikariCP 连接池配置（针对多文件海量数据源自动缩容）
   pool:
     max-size: 15              # 单数据集最大并发连接数（SQLite 推荐 10~15）

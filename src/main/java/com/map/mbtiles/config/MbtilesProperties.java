@@ -50,6 +50,13 @@ public class MbtilesProperties {
     private WatcherProperties watcher = new WatcherProperties();
 
     /**
+     * 是否启用基于元数据 bounds 的空间范围前置过滤剪枝
+     * 默认设为 false：彻底杜绝制图切片工具 metadata bounds 标小导致的有效切片误杀（白块）；
+     * 若设为 true，则在超出 bounds 时直接返回 204 No Content
+     */
+    private boolean boundsFilterEnabled = false;
+
+    /**
      * 连接池详细参数配置（针对多文件海量数据源场景深度调优）
      */
     @Data

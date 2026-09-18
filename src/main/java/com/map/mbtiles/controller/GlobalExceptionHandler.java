@@ -14,11 +14,16 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 
 import javax.servlet.http.HttpServletRequest;
 
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.RequestMapping;
+
 /**
  * 全局统一 RESTful 异常处理器（兼容 Java 8）
  * 拦截并统一包装各类 Web 异常为标准 ApiErrorResponse 结构，杜绝框架默认 HTML 报错与堆栈泄露
+ * 显式声明 produces = application/json，彻底杜绝请求 .png/.pbf 等非文本路由时报 HttpMessageNotWritableException
  */
 @RestControllerAdvice
+@RequestMapping(produces = MediaType.APPLICATION_JSON_VALUE)
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
@@ -44,7 +49,9 @@ public class GlobalExceptionHandler {
                 message,
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
     /**
@@ -63,7 +70,9 @@ public class GlobalExceptionHandler {
                 message,
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
     /**
@@ -83,7 +92,9 @@ public class GlobalExceptionHandler {
                 message,
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED).body(body);
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
     /**
@@ -102,7 +113,9 @@ public class GlobalExceptionHandler {
                 message,
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE).body(body);
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
     /**
@@ -120,7 +133,9 @@ public class GlobalExceptionHandler {
                 ex.getMessage(),
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
     /**
@@ -132,12 +147,18 @@ public class GlobalExceptionHandler {
 
         log.error("系统处理请求发生未捕获异常 [{}]: {}", request.getRequestURI(), ex.getMessage(), ex);
 
+        String detailMessage = (ex.getMessage() != null && !ex.getMessage().trim().isEmpty())
+                ? ex.getMessage()
+                : "服务器内部处理异常，请查看服务端运行日志";
+
         ApiErrorResponse body = new ApiErrorResponse(
                 HttpStatus.INTERNAL_SERVER_ERROR.value(),
                 HttpStatus.INTERNAL_SERVER_ERROR.getReasonPhrase(),
-                "服务器内部处理异常，请联系系统管理员或查看服务端日志",
+                detailMessage,
                 request.getRequestURI()
         );
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 }
