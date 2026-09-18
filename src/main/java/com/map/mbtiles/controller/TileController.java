@@ -192,7 +192,7 @@ public class TileController {
      * 获取指定坐标的矢量或栅格瓦片
      * 支持 1~3 级子目录及 .pbf、.mvt、.png、.jpg、.webp 和无后缀全格式路由
      */
-    @GetMapping(value = {
+    @RequestMapping(method = {RequestMethod.GET, RequestMethod.HEAD}, value = {
             // 单层数据集路由 (支持矢量切片与栅格图片双模)
             "/{datasetName}/{z}/{x}/{y}.pbf",
             "/{datasetName}/{z}/{x}/{y}.mvt",
@@ -258,6 +258,18 @@ public class TileController {
                     .build();
         }
 
+        // 4.1 RFC 7232 日期条件请求秒级短路校验（If-Modified-Since 纳秒拦截）：
+        //     若客户端携带时间戳且数据集文件未发生物理修改，瞬间响应 304，彻底跳过 Caffeine 缓存与 SQLite 检索
+        long ifModifiedSince = request.getDateHeader(HttpHeaders.IF_MODIFIED_SINCE);
+        if (ifModifiedSince != -1 && info.getLastModified() <= ifModifiedSince + 1000) {
+            HttpHeaders notModifiedHeaders = new HttpHeaders();
+            notModifiedHeaders.set(HttpHeaders.CACHE_CONTROL, getCacheControlHeader());
+            notModifiedHeaders.setDate(HttpHeaders.LAST_MODIFIED, info.getLastModified());
+            return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
+                    .headers(notModifiedHeaders)
+                    .build();
+        }
+
         // 5. 查询瓦片（命中内存缓存或 SQLite，查无数据自动返回 TileEntry.EMPTY 单例）
         TileEntry tile = mbtilesService.getTile(resolvedName, z, x, y);
 
@@ -269,12 +281,26 @@ public class TileController {
 
         String etag = tile.etag();
 
-        // 6. 遵循 RFC 7232 标准进行条件请求比对（支持 W/ 弱 ETag 与多 ETag 列表）
+        // 6. 遵循 RFC 7232 标准进行 ETag 条件请求比对（支持 W/ 弱 ETag 与多 ETag 列表）
         if (matchesETag(etag, ifNoneMatch)) {
+            HttpHeaders notModifiedHeaders = new HttpHeaders();
+            notModifiedHeaders.set(HttpHeaders.ETAG, etag);
+            notModifiedHeaders.set(HttpHeaders.CACHE_CONTROL, getCacheControlHeader());
+            notModifiedHeaders.setDate(HttpHeaders.LAST_MODIFIED, info.getLastModified());
             return ResponseEntity.status(HttpStatus.NOT_MODIFIED)
-                    .header(HttpHeaders.ETAG, etag)
-                    .header(HttpHeaders.CACHE_CONTROL, getCacheControlHeader())
+                    .headers(notModifiedHeaders)
                     .build();
+        }
+
+        // 7. HTTP HEAD 轻量探测模式：已确认瓦片存在，直接构造元数据头返回，不产生解压与 Payload 传输开销
+        if ("HEAD".equalsIgnoreCase(request.getMethod())) {
+            HttpHeaders headHeaders = new HttpHeaders();
+            headHeaders.set(HttpHeaders.CONTENT_TYPE, tile.detectContentType());
+            headHeaders.set(HttpHeaders.CACHE_CONTROL, getCacheControlHeader());
+            headHeaders.set(HttpHeaders.ETAG, etag);
+            headHeaders.setDate(HttpHeaders.LAST_MODIFIED, info.getLastModified());
+            headHeaders.setContentLength(tile.data().length);
+            return new ResponseEntity<>(new byte[0], headHeaders, HttpStatus.OK);
         }
 
         // 7. Gzip 内容协商（RFC 7231 / RFC 9110 规范）：
@@ -300,6 +326,7 @@ public class TileController {
         // 自动根据魔数识别下发 image/png, image/jpeg, image/webp 或 application/x-protobuf
         headers.set(HttpHeaders.CONTENT_TYPE, tile.detectContentType());
         headers.set(HttpHeaders.CACHE_CONTROL, getCacheControlHeader());
+        headers.setDate(HttpHeaders.LAST_MODIFIED, info.getLastModified());
         // 解压后若以未压缩格式传输，以 W/ 弱 ETag 标示；压缩原样传输则使用强 ETag
         headers.set(HttpHeaders.ETAG, sendGzip ? etag : "W/" + etag);
         headers.set(HttpHeaders.VARY, "Accept-Encoding");

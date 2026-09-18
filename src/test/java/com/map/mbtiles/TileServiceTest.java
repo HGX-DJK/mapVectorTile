@@ -361,4 +361,22 @@ class TileServiceTest {
         java.nio.file.Path file3 = java.nio.file.Paths.get("data", "2026", "base", "lines.sqlite");
         assertEquals("2026/base/lines", watcher.resolveDatasetName(rootDir, file3));
     }
+
+    @Test
+    @DisplayName("RFC 7232 If-Modified-Since 304 短路比对数学逻辑测试")
+    void testIfModifiedSinceLogic() {
+        long fileLastModified = 1789710000000L;
+
+        // 1. 客户端时间与文件时间完全一致 -> 304
+        long clientTimeExact = 1789710000000L;
+        assertTrue(fileLastModified <= clientTimeExact + 1000, "时间一致应触发 304");
+
+        // 2. 客户端时间晚于文件时间 (更年轻) -> 304
+        long clientTimeNewer = 1789715000000L;
+        assertTrue(fileLastModified <= clientTimeNewer + 1000, "客户端缓存更新应触发 304");
+
+        // 3. 客户端时间早于文件时间 (文件已更新) -> 200，不能触发 304
+        long clientTimeOlder = 1789700000000L;
+        assertFalse(fileLastModified <= clientTimeOlder + 1000, "文件更新后客户端缓存过期，不能触发 304");
+    }
 }

@@ -189,8 +189,13 @@ public class MbtilesService {
             SQLiteConfig sqLiteConfig = new SQLiteConfig();
             sqLiteConfig.setReadOnly(true);
             sqLiteConfig.setCacheSize(10000);           // 单连接 ~40 MB 内部页缓存
-            sqLiteConfig.setJournalMode(SQLiteConfig.JournalMode.WAL);
-            sqLiteConfig.setSynchronous(SQLiteConfig.SynchronousMode.OFF);
+            if (mbtilesFile.canWrite()) {
+                sqLiteConfig.setJournalMode(SQLiteConfig.JournalMode.WAL);
+                sqLiteConfig.setSynchronous(SQLiteConfig.SynchronousMode.OFF);
+            } else {
+                // 只读介质（如 Docker :ro 挂载或只读文件）关闭 WAL 日志写入，杜绝只读异常
+                sqLiteConfig.setJournalMode(SQLiteConfig.JournalMode.OFF);
+            }
             sqLiteConfig.setTempStore(SQLiteConfig.TempStore.MEMORY);
             // 开启 2GB 内存映射 I/O（mmap），充分利用操作系统的 Page Cache 减少内核态拷贝
             sqLiteConfig.setPragma(SQLiteConfig.Pragma.MMAP_SIZE, "2147483648");
@@ -249,6 +254,11 @@ public class MbtilesService {
      * 深度兼容标准 tiles 实体表、视图（map + images）以及非标 grids 表
      */
     private void ensureIndexAndWal(File mbtilesFile) {
+        if (!mbtilesFile.canWrite()) {
+            log.info("切片数据文件处于只读模式/只读介质，安全跳过索引校验与 WAL 模式写入: {}", mbtilesFile.getName());
+            return;
+        }
+
         String url = "jdbc:sqlite:" + mbtilesFile.getAbsolutePath();
         try (Connection conn = java.sql.DriverManager.getConnection(url);
              Statement stmt = conn.createStatement()) {

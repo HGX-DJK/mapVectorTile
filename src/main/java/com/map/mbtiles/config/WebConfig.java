@@ -23,7 +23,9 @@ public class WebConfig implements WebMvcConfigurer {
                         HttpHeaders.ETAG,
                         HttpHeaders.CONTENT_LENGTH,
                         HttpHeaders.CONTENT_ENCODING,
-                        HttpHeaders.CONTENT_TYPE
+                        HttpHeaders.CONTENT_TYPE,
+                        HttpHeaders.LAST_MODIFIED,
+                        HttpHeaders.CACHE_CONTROL
                 )
                 .maxAge(86400); // 浏览器 OPTIONS 预检请求缓存 24 小时，避免冗余往返
     }
