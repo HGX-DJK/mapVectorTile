@@ -30,6 +30,8 @@ class TileServiceTest {
                 defaultSchema.selectTileSql());
         assertEquals("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles WHERE zoom_level <= ?",
                 defaultSchema.selectWarmupSql());
+        assertEquals("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles WHERE zoom_level >= ? AND zoom_level <= ?",
+                defaultSchema.selectWarmupRangeSql());
         assertEquals("CREATE UNIQUE INDEX IF NOT EXISTS tiles_zxy_idx ON tiles (zoom_level, tile_column, tile_row)",
                 defaultSchema.createIndexSql());
 
@@ -39,6 +41,8 @@ class TileServiceTest {
                 customSchema.selectTileSql());
         assertEquals("SELECT zoom_level, tile_column, tile_row, grid FROM grids WHERE zoom_level <= ?",
                 customSchema.selectWarmupSql());
+        assertEquals("SELECT zoom_level, tile_column, tile_row, grid FROM grids WHERE zoom_level >= ? AND zoom_level <= ?",
+                customSchema.selectWarmupRangeSql());
         assertEquals("CREATE UNIQUE INDEX IF NOT EXISTS grids_zxy_idx ON grids (zoom_level, tile_column, tile_row)",
                 customSchema.createIndexSql());
     }

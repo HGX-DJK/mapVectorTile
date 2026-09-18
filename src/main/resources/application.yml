@@ -45,13 +45,19 @@ mbtiles:
   cache-control:
     max-age: 604800           # 浏览器/CDN 缓存有效时长（秒，默认 7 天）
     immutable: true           # 标记为 immutable 避免无意义的重复验证
+  # 全局默认坐标系规范：auto（智能自动采样与拓扑探测，推荐）、tms（MBTiles 规范左下角原点）、xyz（OSM/Google 标准左上角原点）
+  default-scheme: auto
+  # 单数据集显式坐标系规范覆盖配置映射表（key: 数据集路由名称，value: xyz 或 tms）
+  # 拥有最高判定优先级，针对线上缺失 metadata 或无 scheme 声明的数据集一键强制指定
+  # schemes:
+  #   online_custom_dataset: xyz
   # 瓦片表结构与字段自适应探测配置（若后续有新增非标库，直接在下方追加无需改动 Java 代码）
   schema:
-    candidate-table-names: [tiles, grids, grid]                      # 候选表名优先级
-    candidate-data-columns: [tile_data, grid, data, image, content]  # 候选瓦片二进制/图片字段优先级
-    candidate-zoom-columns: [zoom_level, zoom, z, level]             # 候选层级字段
-    candidate-column-columns: [tile_column, col, column, x]          # 候选列号字段
-    candidate-row-columns: [tile_row, row, y]                        # 候选行号字段
+    candidate-table-names: [tiles, grids, grid, map, tile, blocks, data, raster, vector] # 候选表名优先级
+    candidate-data-columns: [tile_data, grid, data, image, content, tile, bytes, blob, value, img] # 候选瓦片二进制/图片字段优先级
+    candidate-zoom-columns: [zoom_level, zoom, z, level, tile_z]                          # 候选层级字段
+    candidate-column-columns: [tile_column, col, column, x, tile_x]                       # 候选列号字段
+    candidate-row-columns: [tile_row, row, y, tile_y]                                     # 候选行号字段
     # 可选：对特定特殊数据集做定制映射（取消注释即可启用）
     # dataset-overrides:
     #   special_map:

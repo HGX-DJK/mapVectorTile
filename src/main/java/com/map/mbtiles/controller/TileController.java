@@ -153,9 +153,11 @@ public class TileController {
             return ResponseEntity.notFound().build();
         }
 
-        // 动态根据客户端请求上下文组装瓦片模板 URL
+        // 动态根据客户端请求上下文与数据集格式组装瓦片模板 URL（支持 .pbf / .png / .jpg 等）
         String baseUrl = resolveBaseUrl(request);
-        String tileUrl = baseUrl + "/tiles/" + resolvedName + "/{z}/{x}/{y}.pbf";
+        String format = info.getFormat() != null ? info.getFormat().toLowerCase() : "pbf";
+        String ext = (format.equals("pbf") || format.equals("mvt")) ? ".pbf" : ("." + format);
+        String tileUrl = baseUrl + "/tiles/" + resolvedName + "/{z}/{x}/{y}" + ext;
 
         Map<String, Object> tileJson = new LinkedHashMap<>();
         tileJson.put("tilejson", "3.0.0");

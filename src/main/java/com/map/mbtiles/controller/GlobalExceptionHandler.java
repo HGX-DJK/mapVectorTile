@@ -13,6 +13,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import javax.servlet.http.HttpServletRequest;
+import org.apache.catalina.connector.ClientAbortException;
+import java.io.IOException;
 
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -139,11 +141,33 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 处理客户端主动切断连接异常（如地图快速拖拽/滚轮缩放时前端 AbortController 取消未下完的切片，或用户关闭标签页）
+     * 对应 Windows 错误: 您的主机中的软件中止了一个已建立的连接 (WSAECONNABORTED 10053)
+     * 对应 Linux 错误: Broken pipe / Connection reset by peer
+     * 此类情况属于客户端在地图交互时的正常行为，降级为 DEBUG 日志并静默结束，避免 ERROR 刷屏与二次写入已关闭 Socket
+     */
+    @ExceptionHandler({ClientAbortException.class, IOException.class})
+    public void handleClientAbort(Exception ex, HttpServletRequest request) {
+        if (isClientAbortException(ex)) {
+            log.debug("客户端主动中止了瓦片请求连接 [{}]: {}", request.getRequestURI(), ex.getMessage());
+            return;
+        }
+        // 如果是其他非连接中断的真实 I/O 异常，才作为警告记录
+        log.warn("处理请求发生 I/O 异常 [{}]: {}", request.getRequestURI(), ex.getMessage());
+    }
+
+    /**
      * 兜底捕获所有未被处理的系统异常
      */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorResponse> handleGenericException(
             Exception ex, HttpServletRequest request) {
+
+        // 针对被其他外层包装类包装的客户端主动中断连接，执行静默短路，避免红色堆栈刷屏
+        if (isClientAbortException(ex)) {
+            log.debug("客户端主动中止了瓦片请求连接 [{}]: {}", request.getRequestURI(), ex.getMessage());
+            return null;
+        }
 
         log.error("系统处理请求发生未捕获异常 [{}]: {}", request.getRequestURI(), ex.getMessage(), ex);
 
@@ -160,5 +184,29 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(body);
+    }
+
+    /**
+     * 判断异常链中是否包含客户端主动断开连接相关的错误
+     */
+    private boolean isClientAbortException(Throwable ex) {
+        if (ex == null) {
+            return false;
+        }
+        if (ex instanceof ClientAbortException) {
+            return true;
+        }
+        String msg = ex.getMessage();
+        if (msg != null) {
+            String lower = msg.toLowerCase();
+            if (lower.contains("中止")
+                    || lower.contains("aborted")
+                    || lower.contains("broken pipe")
+                    || lower.contains("connection reset")
+                    || lower.contains("connection was abort")) {
+                return true;
+            }
+        }
+        return isClientAbortException(ex.getCause());
     }
 }

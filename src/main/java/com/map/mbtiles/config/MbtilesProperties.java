@@ -57,6 +57,17 @@ public class MbtilesProperties {
     private boolean boundsFilterEnabled = false;
 
     /**
+     * 默认切片坐标系规范：auto（智能自动采样探测，推荐）、tms（MBTiles 标准左下角原点）、xyz（OSM/Google 标准左上角原点）
+     */
+    private String defaultScheme = "auto";
+
+    /**
+     * 单数据集坐标系规范个性化覆盖映射（key: 数据集名称，value: xyz 或 tms）
+     * 拥有最高判定优先级，针对线上缺失 metadata 或无 scheme 声明的数据集一键强制指定
+     */
+    private Map<String, String> schemes = new HashMap<>();
+
+    /**
      * 连接池详细参数配置（针对多文件海量数据源场景深度调优）
      */
     @Data

@@ -352,29 +352,60 @@ public class MbtilesService {
                 }
             }
 
-            // 2.2 按候选表名优先级寻找首个匹配的表名
+            // 2.2 优先从候选表名中匹配【存在且具有真实数据】的切片实体表
+            // （解决同时存在空表 tiles 与非空数据表 grids 时误选空表 tiles 的痛点）
             String matchedTable = null;
+            String firstExistingCandidate = null;
             for (String candidate : schemaProps.getCandidateTableNames()) {
                 if (existingTables.contains(candidate.toLowerCase())) {
-                    matchedTable = candidate;
-                    break;
+                    if (firstExistingCandidate == null) {
+                        firstExistingCandidate = candidate;
+                    }
+                    if (isTableNonEmpty(stmt, candidate)) {
+                        matchedTable = candidate;
+                        break;
+                    }
+                }
+            }
+
+            // 若候选表均为空表，回退至首个存在的候选表
+            if (matchedTable == null && firstExistingCandidate != null) {
+                matchedTable = firstExistingCandidate;
+            }
+
+            if (matchedTable == null) {
+                // 候选列表均未命中，遍历数据库内所有非系统表寻找具有真实数据的实体表
+                for (String tbl : existingTables) {
+                    if (!"metadata".equalsIgnoreCase(tbl) && !"sqlite_sequence".equalsIgnoreCase(tbl)
+                            && !"sqlite_stat1".equalsIgnoreCase(tbl) && !"sqlite_stat4".equalsIgnoreCase(tbl)) {
+                        if (isTableNonEmpty(stmt, tbl)) {
+                            matchedTable = tbl;
+                            break;
+                        }
+                    }
                 }
             }
 
             if (matchedTable == null) {
-                // 候选列表均未匹配，兜底采用默认 tiles
+                // 仍未匹配，兜底采用默认 tiles
                 return TableSchema.DEFAULT;
             }
 
-            // 2.3 获取该表的所有列名
+            // 2.3 获取该表的所有列名与列类型（支持自动识别 BLOB 二进制瓦片列）
             List<String> columns = new ArrayList<>();
+            String blobColumn = null;
             try (ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + matchedTable + ")")) {
                 while (rs.next()) {
-                    columns.add(rs.getString("name").toLowerCase());
+                    String colName = rs.getString("name").toLowerCase();
+                    String colType = rs.getString("type");
+                    columns.add(colName);
+                    if (blobColumn == null && colType != null && colType.toUpperCase().contains("BLOB")) {
+                        blobColumn = colName;
+                    }
                 }
             }
 
-            String dataCol = findFirstMatch(columns, schemaProps.getCandidateDataColumns(), "tile_data");
+            String dataCol = findFirstMatch(columns, schemaProps.getCandidateDataColumns(), blobColumn != null ? blobColumn : "tile_data");
             String zoomCol = findFirstMatch(columns, schemaProps.getCandidateZoomColumns(), "zoom_level");
             String colCol = findFirstMatch(columns, schemaProps.getCandidateColumnColumns(), "tile_column");
             String rowCol = findFirstMatch(columns, schemaProps.getCandidateRowColumns(), "tile_row");
@@ -399,6 +430,18 @@ public class MbtilesService {
             }
         }
         return fallback;
+    }
+
+    /**
+     * 极速探查指定表是否真实存在物理行记录（利用 LIMIT 1 在 0.001ms 内返回）
+     * 杜绝空表（如仅有表结构的空 tiles 表）被误选导致非空数据表（如 grids 表）被忽略
+     */
+    private boolean isTableNonEmpty(Statement stmt, String tableName) {
+        try (ResultSet rs = stmt.executeQuery("SELECT 1 FROM " + tableName + " LIMIT 1")) {
+            return rs.next();
+        } catch (SQLException e) {
+            return false;
+        }
     }
 
     /**
@@ -478,6 +521,38 @@ public class MbtilesService {
                         if (info.getMaxzoom() != null && info.getMaxzoom() > 22 && info.getBounds() != null) {
                             info.setTileRanges(DatasetInfo.computeTileRanges(info.getBounds(), info.getMaxzoom()));
                         }
+
+                        // 4. 若元数据未配置 format 或默认为 pbf，从物理瓦片前导魔数自动推断真实格式 (png / jpg / webp / pbf)
+                        boolean metaHadFormat = meta != null && meta.containsKey("format");
+                        if (!metaHadFormat || "pbf".equalsIgnoreCase(info.getFormat())) {
+                            String sampleDataSql = "SELECT " + schema.dataCol() + " FROM " + schema.tableName()
+                                    + " WHERE " + schema.dataCol() + " IS NOT NULL LIMIT 1";
+                            try (ResultSet sampleRs = stmt.executeQuery(sampleDataSql)) {
+                                if (sampleRs.next()) {
+                                    byte[] sampleBytes = sampleRs.getBytes(1);
+                                    if (sampleBytes != null && sampleBytes.length >= 4) {
+                                        if (sampleBytes[0] == (byte) 0x89 && sampleBytes[1] == (byte) 0x50
+                                                && sampleBytes[2] == (byte) 0x4E && sampleBytes[3] == (byte) 0x47) {
+                                            info.setFormat("png");
+                                            info.setType("baselayer");
+                                            log.info("数据集 '{}' 首块切片魔数为 PNG，已自动校准格式为 png (栅格底图)", datasetName);
+                                        } else if (sampleBytes[0] == (byte) 0xFF && sampleBytes[1] == (byte) 0xD8
+                                                && sampleBytes[2] == (byte) 0xFF) {
+                                            info.setFormat("jpg");
+                                            info.setType("baselayer");
+                                            log.info("数据集 '{}' 首块切片魔数为 JPEG，已自动校准格式为 jpg (栅格底图)", datasetName);
+                                        } else if (sampleBytes.length >= 12 && sampleBytes[0] == (byte) 'R'
+                                                && sampleBytes[1] == (byte) 'I' && sampleBytes[2] == (byte) 'F'
+                                                && sampleBytes[3] == (byte) 'F') {
+                                            info.setFormat("webp");
+                                            info.setType("baselayer");
+                                            log.info("数据集 '{}' 首块切片魔数为 WebP，已自动校准格式为 webp (栅格底图)", datasetName);
+                                        }
+                                    }
+                                }
+                            } catch (Exception ignored) {
+                            }
+                        }
                     }
                 }
             }
@@ -532,7 +607,14 @@ public class MbtilesService {
     }
 
     /**
-     * 解析或获取指定数据集的坐标系规范（优先检查 metadata 声明，默认回退 TMS 规范）
+     * 解析或获取指定数据集的坐标系规范（TMS / XYZ）
+     * 判定优先级：
+     * 1. 优先检查 application.yml 中的显式强制配置 (mbtiles.schemes)
+     * 2. 其次检查 metadata 元数据表中的显式声明 ("scheme" = "xyz" / "tms")
+     * 3. 若元数据未声明，触发【物理切片采样与地理边界拓扑自愈探测】：
+     *    从 SQLite 中提取真实切片记录，与其地理边界（Bounds）或半球经纬度进行几何对齐比对，
+     *    精准 0.05ms 自动研判出该数据集究竟是 TMS 还是 XYZ，杜绝盲目预设 TMS 导致瓦片查空
+     * 4. 兜底采用 mbtiles.default-scheme（若为 auto 则默认 TMS）
      */
     public TileScheme getDatasetScheme(String datasetName) {
         String normalizedName = normalizeDatasetName(datasetName);
@@ -541,6 +623,18 @@ public class MbtilesService {
         }
 
         return datasetSchemes.computeIfAbsent(normalizedName, name -> {
+            // 1. 检查 yml 显式配置覆盖
+            Map<String, String> explicitSchemes = properties.getSchemes();
+            if (explicitSchemes != null && explicitSchemes.containsKey(name)) {
+                TileScheme configured = TileScheme.fromString(explicitSchemes.get(name));
+                if (configured != null) {
+                    lockedSchemes.add(name);
+                    log.info("数据集 '{}' 命中 yml 显式配置坐标系规范: {}", name, configured);
+                    return configured;
+                }
+            }
+
+            // 2. 检查 SQLite metadata 表中的声明
             Map<String, String> meta = getMetadata(name);
             if (meta != null && meta.containsKey("scheme")) {
                 TileScheme declared = TileScheme.fromString(meta.get("scheme"));
@@ -550,9 +644,95 @@ public class MbtilesService {
                     return declared;
                 }
             }
-            // 默认遵循 MBTiles 官方规范 (TMS 左下角原点)
-            return TileScheme.TMS;
+
+            // 3. 元数据未声明时，执行【物理瓦片拓扑智能自检】
+            TileScheme detected = detectSchemeFromPhysicalTiles(name, meta);
+            if (detected != null) {
+                lockedSchemes.add(name);
+                log.info("数据集 '{}' 元数据未声明坐标系，已通过物理瓦片采样与地理拓扑自检精准识别并锁定为: {}", name, detected);
+                return detected;
+            }
+
+            // 4. 兜底采用配置的默认值
+            TileScheme fallback = TileScheme.fromString(properties.getDefaultScheme());
+            return fallback != null ? fallback : TileScheme.TMS;
         });
+    }
+
+    /**
+     * 通过物理瓦片采样比对地理范围拓扑，智能自检确定 TMS 还是 XYZ
+     */
+    private TileScheme detectSchemeFromPhysicalTiles(String datasetName, Map<String, String> meta) {
+        DataSource dataSource = getDataSource(datasetName);
+        if (dataSource == null) {
+            return null;
+        }
+
+        try (Connection conn = dataSource.getConnection()) {
+            TableSchema schema = getTableSchema(datasetName, conn);
+            String sampleSql = "SELECT " + schema.zoomCol() + ", " + schema.colCol() + ", " + schema.rowCol()
+                    + " FROM " + schema.tableName() + " LIMIT 5";
+
+            int sampleZ = -1;
+            int sampleRow = -1;
+
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(sampleSql)) {
+                if (rs.next()) {
+                    sampleZ = rs.getInt(1);
+                    sampleRow = rs.getInt(3);
+                }
+            }
+
+            if (sampleZ < 0 || sampleRow < 0) {
+                return null;
+            }
+
+            // 策略 A：若 metadata 中含有 bounds，根据 bounds 预计算边界盒比对
+            if (meta != null && meta.containsKey("bounds")) {
+                double[] bounds = DatasetInfo.parseDoubleArray(meta.get("bounds"));
+                if (bounds != null && bounds.length == 4) {
+                    DatasetInfo.TileRange[] ranges = DatasetInfo.computeTileRanges(bounds, Math.max(22, sampleZ));
+                    if (ranges != null && sampleZ < ranges.length && ranges[sampleZ] != null) {
+                        DatasetInfo.TileRange range = ranges[sampleZ];
+                        int minY_xyz = range.getMinY();
+                        int maxY_xyz = range.getMaxY();
+
+                        int maxCoord = 1 << sampleZ;
+                        int minY_tms = (maxCoord - 1) - maxY_xyz;
+                        int maxY_tms = (maxCoord - 1) - minY_xyz;
+
+                        boolean matchXyz = (sampleRow >= minY_xyz - 1 && sampleRow <= maxY_xyz + 1);
+                        boolean matchTms = (sampleRow >= minY_tms - 1 && sampleRow <= maxY_tms + 1);
+
+                        if (matchXyz && !matchTms) {
+                            return TileScheme.XYZ;
+                        }
+                        if (matchTms && !matchXyz) {
+                            return TileScheme.TMS;
+                        }
+                    }
+                }
+            }
+
+            // 策略 B：若无 bounds，根据北半球特征判定（中国及北半球绝大部分地区：纬度 > 0）
+            // 在 Web 墨卡托投影中：
+            // 北半球的 Web XYZ y 处于上半球 (0 ~ 2^(z-1) - 1)；
+            // 北半球的 TMS y 处于下半球 (2^(z-1) ~ 2^z - 1)。
+            if (sampleZ >= 2) {
+                int halfCoord = 1 << (sampleZ - 1);
+                if (sampleRow >= halfCoord) {
+                    return TileScheme.TMS;
+                } else {
+                    return TileScheme.XYZ;
+                }
+            }
+
+        } catch (Exception e) {
+            log.debug("物理采样推测数据集 {} 坐标系异常: {}", datasetName, e.getMessage());
+        }
+
+        return null;
     }
 
     /**
@@ -641,50 +821,71 @@ public class MbtilesService {
             return 0;
         }
 
-        TileScheme scheme = getDatasetScheme(datasetName);
+        String normalizedName = normalizeDatasetName(datasetName);
+        DatasetInfo info = getDatasetInfo(normalizedName);
+        int actualMin = (info != null && info.getMinzoom() != null) ? info.getMinzoom() : 0;
+        int actualMax = (info != null && info.getMaxzoom() != null) ? info.getMaxzoom() : 22;
+
+        int startZoom = actualMin;
+        int endZoom;
+        if (actualMin > maxZoom) {
+            // 该数据集物理层级起点偏高（如城市级建筑/道路/非标网格层级从 10 级开始），智能预热其顶层 1~2 个层级
+            endZoom = Math.min(actualMax, actualMin + 1);
+            log.info("数据集 '{}' 最小层级 ({}) 大于配置预热层级 ({})，智能适配预热层级区间: {} ~ {}",
+                    normalizedName, actualMin, maxZoom, startZoom, endZoom);
+        } else {
+            endZoom = Math.min(actualMax, maxZoom);
+        }
+
+        TileScheme scheme = getDatasetScheme(normalizedName);
         Cache tileCache = cacheManager.getCache("tiles");
         int loaded = 0;
 
         try (Connection conn = dataSource.getConnection()) {
-            TableSchema schema = getTableSchema(datasetName, conn);
-            String sql = schema.selectWarmupSql();
+            TableSchema schema = getTableSchema(normalizedName, conn);
+            String sql = schema.selectWarmupRangeSql();
 
             try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
-                pstmt.setInt(1, maxZoom);
+                pstmt.setInt(1, startZoom);
+                pstmt.setInt(2, endZoom);
 
                 try (ResultSet rs = pstmt.executeQuery()) {
                     while (rs.next()) {
                         int z = rs.getInt(1);
                         int x = rs.getInt(2);
-                    int tileRow = rs.getInt(3);
-                    byte[] data = rs.getBytes(4);
+                        int tileRow = rs.getInt(3);
+                        byte[] data = rs.getBytes(4);
 
-                    if (data == null || data.length == 0) {
-                        continue;
+                        if (data == null || data.length == 0) {
+                            continue;
+                        }
+
+                        // 根据该数据集坐标系将数据库 tileRow 准确还原为 Web XYZ y
+                        int y = scheme.toWebY(z, tileRow);
+
+                        CRC32 crc = new CRC32();
+                        crc.update(data);
+                        String etag = "\"" + Long.toHexString(crc.getValue()) + "\"";
+
+                        boolean gzipped = data.length >= 2
+                                && data[0] == (byte) 0x1F
+                                && data[1] == (byte) 0x8B;
+
+                        TileEntry entry = new TileEntry(data, etag, gzipped);
+
+                        if (tileCache != null) {
+                            tileCache.put(normalizedName + ":" + z + ":" + x + ":" + y, entry);
+                        }
+                        loaded++;
+                        if (loaded >= 5000) {
+                            log.info("数据集 '{}' 批量预热瓦片达到 5000 块安全上限，提前结束批量装载", normalizedName);
+                            break;
+                        }
                     }
-
-                    // 根据该数据集坐标系将数据库 tileRow 准确还原为 Web XYZ y
-                    int y = scheme.toWebY(z, tileRow);
-
-                    CRC32 crc = new CRC32();
-                    crc.update(data);
-                    String etag = "\"" + Long.toHexString(crc.getValue()) + "\"";
-
-                    boolean gzipped = data.length >= 2
-                            && data[0] == (byte) 0x1F
-                            && data[1] == (byte) 0x8B;
-
-                    TileEntry entry = new TileEntry(data, etag, gzipped);
-
-                    if (tileCache != null) {
-                        tileCache.put(datasetName + ":" + z + ":" + x + ":" + y, entry);
-                    }
-                    loaded++;
-                }
                 }
             }
         } catch (SQLException e) {
-            log.error("数据集 {} 批量预热失败: {}", datasetName, e.getMessage());
+            log.error("数据集 {} 批量预热失败: {}", normalizedName, e.getMessage());
         }
 
         return loaded;

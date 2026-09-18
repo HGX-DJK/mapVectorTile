@@ -80,6 +80,13 @@ public final class TableSchema {
     }
 
     /**
+     * 生成层级区间批量瓦片预加载 SQL（支持城市级/高层级切片自适应预热）
+     */
+    public String selectWarmupRangeSql() {
+        return "SELECT " + zoomCol + ", " + colCol + ", " + rowCol + ", " + dataCol + " FROM " + tableName + " WHERE " + zoomCol + " >= ? AND " + zoomCol + " <= ?";
+    }
+
+    /**
      * 生成实体表三元组联合索引创建 SQL
      */
     public String createIndexSql() {

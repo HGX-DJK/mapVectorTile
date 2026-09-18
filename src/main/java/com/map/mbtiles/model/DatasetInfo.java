@@ -308,7 +308,7 @@ public class DatasetInfo {
     /**
      * 辅助方法：将逗号分隔的字符串解析为 double 数组
      */
-    private static double[] parseDoubleArray(String val) {
+    public static double[] parseDoubleArray(String val) {
         if (val == null || val.trim().isEmpty()) {
             return null;
         }
