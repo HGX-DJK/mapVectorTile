@@ -510,4 +510,32 @@ class TileServiceTest {
         boolean shouldFilterOutStrict = properties.isBoundsFilterEnabled() && !info.isTileWithinBounds(z, suburbanX, suburbanY);
         assertTrue(shouldFilterOutStrict, "显式开启 bounds 剪枝时，越界瓦片才会被拦截短路响应 204");
     }
+
+    @Test
+    @DisplayName("hasCoveringIndex 智能探测复合主键、自定义命名索引与无索引场景")
+    void testSmartCoveringIndexDetection() throws Exception {
+        try (java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite::memory:");
+             java.sql.Statement stmt = conn.createStatement()) {
+
+            // 1. 模拟实体表 grids，带有复合主键 (zoom_level, tile_column, tile_row)
+            // SQLite 会自动生成 sqlite_autoindex_grids_1，名称不叫 grids_zxy_idx
+            stmt.execute("CREATE TABLE grids (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, grid BLOB, PRIMARY KEY (zoom_level, tile_column, tile_row))");
+
+            // 智能探测应能识别到主键或系统自动索引，返回 true
+            boolean hasIdxForGrids = com.map.mbtiles.service.MbtilesService.hasCoveringIndex(conn, "grids", "zoom_level", "tile_column", "tile_row");
+            assertTrue(hasIdxForGrids, "具有复合主键的 grids 表应被成功识别为已有索引，跳过重复建索");
+
+            // 2. 模拟实体表 custom_tiles，带自定义名称的索引
+            stmt.execute("CREATE TABLE custom_tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)");
+            stmt.execute("CREATE INDEX my_custom_index ON custom_tiles (zoom_level, tile_column, tile_row)");
+
+            boolean hasIdxForCustom = com.map.mbtiles.service.MbtilesService.hasCoveringIndex(conn, "custom_tiles", "zoom_level", "tile_column", "tile_row");
+            assertTrue(hasIdxForCustom, "具有自定义索引名 my_custom_index 的表应被成功识别");
+
+            // 3. 模拟无索引的普通表
+            stmt.execute("CREATE TABLE unindexed_tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)");
+            boolean hasIdxForUnindexed = com.map.mbtiles.service.MbtilesService.hasCoveringIndex(conn, "unindexed_tiles", "zoom_level", "tile_column", "tile_row");
+            assertFalse(hasIdxForUnindexed, "没有任何索引的表应返回 false，以便触发首次建索");
+        }
+    }
 }

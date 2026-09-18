@@ -27,6 +27,10 @@ mbtiles:
   data-dir: ./data
   # 是否开启基于元数据 bounds 的空间短路过滤（默认 false：彻底杜绝元数据标小导致的边缘切片误杀白块）
   bounds-filter-enabled: false
+  # 是否在服务启动时自动检查并创建三元组联合索引 (zoom, col, row)
+  # 设为 true 时：服务会智能检测已有的主键或索引（包含自动主键索引），若已覆盖所需坐标列则 0ms 瞬间跳过；
+  # 仅在没有任何坐标索引时才会尝试建索。若数据量极大且确认已在外部建好索引，可设为 false 彻底跳过建索
+  auto-create-index: true
   # SQLite HikariCP 连接池配置（针对多文件海量数据源高并发低延迟调优）
   pool:
     max-size: 40              # 单数据集最大并发连接数提升至 40，保障一屏 30~50 瓦片瞬间并发无排队

@@ -266,8 +266,19 @@ public class MbtilesService {
         try (Connection conn = java.sql.DriverManager.getConnection(url);
              Statement stmt = conn.createStatement()) {
 
-            // 在可写初始化连接上显式开启 WAL 模式
-            stmt.execute("PRAGMA journal_mode = WAL");
+            // 设置 3 秒超时，避免在其他工具持有读写锁时无限期挂起
+            stmt.execute("PRAGMA busy_timeout = 3000");
+
+            // 检查当前日志模式，非 WAL 模式才显式切换
+            String currentJournal = null;
+            try (ResultSet rs = stmt.executeQuery("PRAGMA journal_mode")) {
+                if (rs.next()) {
+                    currentJournal = rs.getString(1);
+                }
+            }
+            if (!"wal".equalsIgnoreCase(currentJournal)) {
+                stmt.execute("PRAGMA journal_mode = WAL");
+            }
 
             // 自适应解析该数据库的表结构元信息 (tiles 或 grids 等)
             TableSchema schema = getTableSchema(mbtilesFile.getName(), conn);
@@ -280,21 +291,113 @@ public class MbtilesService {
                 }
             }
 
-            if ("view".equalsIgnoreCase(tableType)) {
-                log.info("{} 采用 MBTiles 视图结构（VIEW: {}），在底层 map 和 images 表上建立索引", mbtilesFile.getName(), schema.tableName());
-                stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS map_tile_idx ON map (zoom_level, tile_column, tile_row)");
-                stmt.execute("CREATE INDEX IF NOT EXISTS images_tile_id_idx ON images (tile_id)");
+            if (!properties.isAutoCreateIndex()) {
+                log.info("{} 配置了 mbtiles.auto-create-index=false，跳过自动索引检查与创建", mbtilesFile.getName());
+            } else if ("view".equalsIgnoreCase(tableType)) {
+                if (!hasCoveringIndex(conn, "map", "zoom_level", "tile_column", "tile_row")) {
+                    log.info("{} 采用 MBTiles 视图结构（VIEW: {}），在底层 map 和 images 表上建立索引", mbtilesFile.getName(), schema.tableName());
+                    stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS map_tile_idx ON map (zoom_level, tile_column, tile_row)");
+                } else {
+                    log.info("{} 视图底层表 map 已存在可用坐标索引/主键，安全跳过重复建索 (耗时 0ms)", mbtilesFile.getName());
+                }
+                if (!hasCoveringIndex(conn, "images", "tile_id")) {
+                    stmt.execute("CREATE INDEX IF NOT EXISTS images_tile_id_idx ON images (tile_id)");
+                }
             } else {
-                log.info("{} 采用实体表结构（TABLE: {}），在对应列上建立联合索引", mbtilesFile.getName(), schema.tableName());
-                stmt.execute(schema.createIndexSql());
+                if (!hasCoveringIndex(conn, schema.tableName(), schema.zoomCol(), schema.colCol(), schema.rowCol())) {
+                    log.warn("{} 采用实体表结构（TABLE: {}），未检测到覆盖坐标列 ({}, {}, {}) 的索引/主键，正在建立联合索引...",
+                            mbtilesFile.getName(), schema.tableName(), schema.zoomCol(), schema.colCol(), schema.rowCol());
+                    stmt.execute(schema.createIndexSql());
+                } else {
+                    log.info("{} 采用实体表结构（TABLE: {}），已检测到覆盖坐标列 ({}, {}, {}) 的索引/主键，安全跳过重复建索 (耗时 0ms)",
+                            mbtilesFile.getName(), schema.tableName(), schema.zoomCol(), schema.colCol(), schema.rowCol());
+                }
             }
 
-            // 执行检查点截断 WAL，确保只读连接池在一个整洁的状态下启动
-            stmt.execute("PRAGMA wal_checkpoint(TRUNCATE)");
-            log.info("已成功校验/创建索引并清理 WAL: {}", mbtilesFile.getName());
+            // 执行轻量 PASSIVE 检查点，不阻塞任何外部读写客户端（如 Navicat），确保安全干净
+            try {
+                stmt.execute("PRAGMA wal_checkpoint(PASSIVE)");
+            } catch (Exception ignored) {
+            }
+            log.info("已成功校验/确认索引与 WAL 状态: {}", mbtilesFile.getName());
         } catch (Exception e) {
             log.warn("检查或初始化索引/WAL失败 {}: {}", mbtilesFile.getName(), e.getMessage());
         }
+    }
+
+    /**
+     * 智能探测指定表是否已存在覆盖所需列（例如 zoom_level, tile_column, tile_row）的主键约束或联合索引
+     * 避免因原有主键/索引名称不叫 *_zxy_idx 而对数千万条记录的大型 SQLite 数据库重复执行耗时数十分钟的建索操作
+     *
+     * @param conn 活跃的数据库连接
+     * @param tableName 目标表名
+     * @param requiredColumns 必须覆盖的目标列名
+     * @return 若已存在覆盖这些列的主键或索引则返回 true；否则返回 false
+     */
+    public static boolean hasCoveringIndex(Connection conn, String tableName, String... requiredColumns) {
+        if (requiredColumns == null || requiredColumns.length == 0) {
+            return true;
+        }
+        Set<String> requiredSet = new java.util.HashSet<>();
+        for (String col : requiredColumns) {
+            if (col != null && !col.trim().isEmpty()) {
+                requiredSet.add(col.trim().toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        if (requiredSet.isEmpty()) {
+            return true;
+        }
+
+        try (Statement stmt = conn.createStatement()) {
+            String safeTableName = tableName.replace("\"", "\"\"");
+
+            // 1. 检查主键约束是否已完整覆盖所有目标字段 (PRAGMA table_info)
+            Set<String> pkCols = new java.util.HashSet<>();
+            try (ResultSet rs = stmt.executeQuery("PRAGMA table_info(\"" + safeTableName + "\")")) {
+                while (rs.next()) {
+                    int pk = rs.getInt("pk");
+                    String colName = rs.getString("name");
+                    if (pk > 0 && colName != null) {
+                        pkCols.add(colName.trim().toLowerCase(java.util.Locale.ROOT));
+                    }
+                }
+            }
+            if (pkCols.containsAll(requiredSet)) {
+                log.info("表 [{}] 的主键约束已完整覆盖坐标列 {}，安全复用已有主键索引", tableName, requiredSet);
+                return true;
+            }
+
+            // 2. 检查现有普通索引或系统自动生成的 UNIQUE / PK 索引 (PRAGMA index_list)
+            List<String> indexNames = new ArrayList<>();
+            try (ResultSet rs = stmt.executeQuery("PRAGMA index_list(\"" + safeTableName + "\")")) {
+                while (rs.next()) {
+                    String idxName = rs.getString("name");
+                    if (idxName != null && !idxName.trim().isEmpty()) {
+                        indexNames.add(idxName.trim());
+                    }
+                }
+            }
+
+            for (String idxName : indexNames) {
+                Set<String> indexCols = new java.util.HashSet<>();
+                String safeIdxName = idxName.replace("\"", "\"\"");
+                try (ResultSet rs = stmt.executeQuery("PRAGMA index_info(\"" + safeIdxName + "\")")) {
+                    while (rs.next()) {
+                        String colName = rs.getString("name");
+                        if (colName != null) {
+                            indexCols.add(colName.trim().toLowerCase(java.util.Locale.ROOT));
+                        }
+                    }
+                }
+                if (indexCols.containsAll(requiredSet)) {
+                    log.info("表 [{}] 发现已存在覆盖坐标列 {} 的索引 [{}]，安全复用现有索引", tableName, requiredSet, idxName);
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            log.warn("检查表 [{}] 现有索引/主键时出错: {}", tableName, e.getMessage());
+        }
+        return false;
     }
 
     /**

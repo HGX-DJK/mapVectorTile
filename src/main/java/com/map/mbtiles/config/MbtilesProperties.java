@@ -57,6 +57,14 @@ public class MbtilesProperties {
     private boolean boundsFilterEnabled = false;
 
     /**
+     * 是否在服务启动时自动为 SQLite 数据库校验并补全创建联合索引 (zoom, col, row)
+     * 默认设为 true：启动时会自动智能检测已有索引与主键（覆盖检查）；
+     * 若已存在覆盖该三列的索引/主键，会自动跳过（耗时 0ms）；若都不存在才执行创建；
+     * 若设为 false，则彻底跳过建索逻辑，适用于超大只读库、外部已建好索引的生产环境，确保秒级瞬时启动
+     */
+    private boolean autoCreateIndex = true;
+
+    /**
      * 默认切片坐标系规范：auto（智能自动采样探测，推荐）、tms（MBTiles 标准左下角原点）、xyz（OSM/Google 标准左上角原点）
      */
     private String defaultScheme = "auto";
